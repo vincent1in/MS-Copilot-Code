@@ -24,6 +24,7 @@ import { WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 import { createLogger, trunc } from "./log.js";
 import { uploadImage, type ImageAnnotation } from "./image.js";
+import { assertEgress } from "./egress.js";
 
 const log = createLogger("session");
 
@@ -244,6 +245,8 @@ export class CopilotSession {
     const token = await this.options.getToken();
     const { oid, tid } = decodeJwt(token);
     const url = this.buildUrl(token, oid, tid, turn.grounded ?? false);
+    // Refuse before the token goes anywhere but substrate.office.com (or the test stub).
+    assertEgress("chat", url);
 
     const { annotations, note } = await this.uploadImages(token, turn);
     const message: OutgoingMessage = { text: note ? `${text}\n\n${note}` : text, annotations };

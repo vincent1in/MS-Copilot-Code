@@ -28,6 +28,7 @@ import { BAP_SCOPE, POWERPLATFORM_SCOPE } from "./auth.js";
 import { AGENT_FILE } from "./paths.js";
 import { createLogger } from "./log.js";
 import { writePrivateFile } from "./private-fs.js";
+import { assertEgress, isPowerPlatformEnvironmentHost } from "./egress.js";
 
 const log = createLogger("agent");
 
@@ -99,7 +100,16 @@ export async function resolveEnvironmentHost(
   resolveDns: DnsResolver,
   override?: string,
 ): Promise<string> {
-  if (override) return override;
+  if (override) {
+    // The override receives a Power Platform bearer token, so it must still be a
+    // Power Platform environment host — not anything an env var happens to say.
+    if (!isPowerPlatformEnvironmentHost(override)) {
+      throw new Error(
+        `M365_POWERPLATFORM_HOST must be a *.environment.api.powerplatform.com host, got ${JSON.stringify(override)}`,
+      );
+    }
+    return override.toLowerCase();
+  }
   const host = environmentHost(envId);
   if (await resolveDns(host)) return host;
   throw new Error(
@@ -174,6 +184,7 @@ async function discoverEnvironmentId(
   getTokenForScope: (scopes: string[]) => Promise<string>,
 ): Promise<string> {
   const token = await getTokenForScope([BAP_SCOPE]);
+  assertEgress("studio", BAP_ENVIRONMENT_URL);
   const response = await doFetch(BAP_ENVIRONMENT_URL, { headers: { Authorization: `Bearer ${token}` } });
   if (!response.ok) throw new AgentHttpError(await describeFailure("environment discovery", response), response.status);
 
@@ -181,8 +192,13 @@ async function discoverEnvironmentId(
   const name: string = body?.name ?? "";
   // `Default-<tenantGuid>`.
   const guid = name.replace(/^Default-/i, "");
-  if (!guid) throw new Error(`Power Platform returned an unexpected environment name: ${JSON.stringify(name)}`);
-  return guid.replace(/-/g, "");
+  const envId = guid.replace(/-/g, "").toLowerCase();
+  // The id becomes part of a hostname that receives a bearer token, so it must be
+  // exactly a tenant GUID: 32 hex digits, nothing that could smuggle in a host.
+  if (!/^[0-9a-f]{32}$/.test(envId)) {
+    throw new Error(`Power Platform returned an unexpected environment name: ${JSON.stringify(name)}`);
+  }
+  return envId;
 }
 
 /**
@@ -199,6 +215,7 @@ async function findBot(
   name: string,
 ): Promise<string | undefined> {
   const url = `https://${host}/copilotstudio/minimalBots/api?api-version=${COPILOT_STUDIO_API_VERSION}`;
+  assertEgress("studio", url);
   const response = await doFetch(url, { headers: studioHeaders(token) });
   if (!response.ok) throw new AgentHttpError(await describeFailure("listing agents", response), response.status);
 
@@ -282,6 +299,7 @@ async function createBot(
   name: string,
 ): Promise<string> {
   const url = `https://${host}/copilotstudio/minimalBots/api?api-version=${COPILOT_STUDIO_API_VERSION}`;
+  assertEgress("studio", url);
   const response = await doFetch(url, {
     method: "POST",
     headers: studioHeaders(token),
@@ -302,6 +320,7 @@ async function publishBot(
   botId: string,
 ): Promise<string> {
   const url = `https://${host}/copilotstudio/minimalBots/api/${encodeURIComponent(botId)}/publish?api-version=${COPILOT_STUDIO_API_VERSION}`;
+  assertEgress("studio", url);
   const response = await doFetch(url, { method: "POST", headers: studioHeaders(token) });
   if (!response.ok) throw new AgentHttpError(await describeFailure("publishing the agent", response), response.status);
 

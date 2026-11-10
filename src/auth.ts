@@ -16,6 +16,7 @@
 import { readFileSync } from "node:fs";
 import type { ICachePlugin, TokenCacheContext } from "@azure/msal-node";
 import { CACHE_FILE } from "./paths.js";
+import { createGuardedNetworkClient } from "./egress.js";
 import { createLogger } from "./log.js";
 import { writePrivateFile } from "./private-fs.js";
 
@@ -113,6 +114,8 @@ export function createTokenClient(options: TokenClientOptions = {}): TokenClient
     app = new PublicClientApplication({
       auth: { clientId: CLIENT_ID, authority: AUTHORITY },
       cache: { cachePlugin: createCachePlugin(options.cacheFile) },
+      // Token traffic can only reach login.microsoftonline.com (see egress.ts).
+      system: { networkClient: createGuardedNetworkClient() },
     }) as unknown as MsalLike;
     return app;
   }

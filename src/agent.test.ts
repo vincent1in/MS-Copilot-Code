@@ -118,11 +118,35 @@ describe("environment host discovery", () => {
     await expect(resolveEnvironmentHost(ENV_ID, async () => false)).rejects.toThrow(/resolve/i);
   });
 
-  it("honours an explicit override without touching DNS", async () => {
+  it("honours an explicit Power Platform override without touching DNS", async () => {
     const resolveDns = vi.fn(async () => true);
-    const host = await resolveEnvironmentHost(ENV_ID, resolveDns, "my.host.example");
-    expect(host).toBe("my.host.example");
+    const override = "defaultabc123.ff.environment.api.powerplatform.com";
+    const host = await resolveEnvironmentHost(ENV_ID, resolveDns, override);
+    expect(host).toBe(override);
     expect(resolveDns).not.toHaveBeenCalled();
+  });
+
+  it("refuses an override that is not a Power Platform environment host", async () => {
+    // The override receives a Power Platform bearer token.
+    const resolveDns = vi.fn(async () => true);
+    for (const bad of [
+      "my.host.example",
+      "x.ff.environment.api.powerplatform.com.evil.example",
+      "evil.example/#.ff.environment.api.powerplatform.com",
+    ]) {
+      await expect(resolveEnvironmentHost(ENV_ID, resolveDns, bad)).rejects.toThrow(/M365_POWERPLATFORM_HOST/);
+    }
+    expect(resolveDns).not.toHaveBeenCalled();
+  });
+});
+
+describe("environment id from BAP", () => {
+  it("refuses an environment name that is not a tenant GUID, before calling Copilot Studio", async () => {
+    // A crafted name like "Default-evil.example#" would otherwise be spliced into the
+    // hostname that receives the Power Platform token.
+    const fetch = fakeFetch([["api.bap.microsoft.com", () => ({ name: "Default-evil.example#xx" })]]);
+    await expect(getOrCreateAgent(deps({ fetch }))).rejects.toThrow(/unexpected environment name/);
+    expect(fetch.mock.calls.every(([url]) => String(url).includes("api.bap.microsoft.com"))).toBe(true);
   });
 });
 

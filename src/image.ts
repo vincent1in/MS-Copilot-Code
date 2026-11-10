@@ -9,6 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { assertEgress } from "./egress.js";
 import type { ChatMessage } from "./translate.js";
 import { createLogger } from "./log.js";
 
@@ -76,7 +77,9 @@ export async function uploadImage(dataUrl: string, options: UploadOptions): Prom
   form.append("optionsSets", "cwcgptvsan");
   form.append("optionsSets", "flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch");
 
-  const response = await fetch(`${options.origin}/m365Copilot/UploadFile`, {
+  const target = `${options.origin}/m365Copilot/UploadFile`;
+  assertEgress("chat", target);
+  const response = await fetch(target, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${options.token}`,

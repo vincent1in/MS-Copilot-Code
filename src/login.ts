@@ -23,6 +23,7 @@ import { AUTHORITY, CLIENT_ID, REDIRECT_URI, SYDNEY_SCOPES, authCodeFromUrl, cre
 import { CONFIG_DIR, SECRETS_FILE } from "./paths.js";
 import { createLogger } from "./log.js";
 import { ensurePrivateDir } from "./private-fs.js";
+import { createGuardedNetworkClient } from "./egress.js";
 
 const log = createLogger("login");
 
@@ -137,6 +138,7 @@ export async function login(options: LoginOptions = {}): Promise<string> {
   const app = new PublicClientApplication({
     auth: { clientId: CLIENT_ID, authority: AUTHORITY },
     cache: { cachePlugin: createCachePlugin(options.cacheFile) },
+    system: { networkClient: createGuardedNetworkClient() },
   });
 
   // PKCE: the verifier stays here, only its hash goes to the authorize endpoint.
