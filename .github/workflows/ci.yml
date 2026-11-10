@@ -52,9 +52,12 @@ jobs:
           if [ -f "${{ runner.temp }}/net-guard.jsonl" ]; then
             node -e '
               const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse);
-              const remote = lines.filter((l) => l.kind !== "loaded" && !l.local);
-              console.log(`${lines.filter((l) => l.kind === "loaded").length} Node processes/threads guarded; ${remote.length} non-loopback attempts`);
+              const attempts = lines.filter((l) => l.kind !== "loaded" && !l.local);
+              // test/net-guard.test.ts probes the reserved .invalid TLD to prove blocking works.
+              const selfTest = attempts.filter((l) => String(l.host).endsWith(".invalid"));
+              const remote = attempts.filter((l) => !String(l.host).endsWith(".invalid"));
+              console.log(`${lines.filter((l) => l.kind === "loaded").length} Node processes/threads guarded; ${selfTest.length} guard self-test probes blocked; ${remote.length} other non-loopback attempts`);
               for (const r of remote) console.log(`  BLOCKED ${r.kind} ${r.host}:${r.port ?? "-"} ${r.url ?? ""}`);
-              process.exitCode = remote.length > 0 ? 1 : 0;
+              process.exitCode = remote.length > 0 || selfTest.length === 0 ? 1 : 0;
             ' "${{ runner.temp }}/net-guard.jsonl"
           fi
