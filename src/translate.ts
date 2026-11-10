@@ -16,6 +16,12 @@ import { z } from "zod";
 import { buildToolPrompt, parseToolCalls, renderToolCall, type ParsedToolCall, type ToolDef } from "./fenced.js";
 import type { TurnResult } from "./session.js";
 
+// No runtime code generation: zod v4 otherwise JIT-compiles object parsers with
+// `new Function`. Our schemas are small and static, so the interpreter is fine, and the
+// bundle then evaluates no generated code at all. zod is bundled, so this config is
+// private to this plugin and does not touch opencode's own copy.
+z.config({ jitless: true });
+
 // --- request schema -------------------------------------------------------------
 
 const ContentPart = z.object({ type: z.string(), text: z.string().optional() }).passthrough();

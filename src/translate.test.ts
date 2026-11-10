@@ -562,3 +562,11 @@ describe("tool results", () => {
     expect(prompt.indexOf("Only the first call ran.")).toBeLessThan(prompt.indexOf("<tool_response"));
   });
 });
+
+describe("zod runs jitless", () => {
+  it("never JIT-compiles parsers with new Function", async () => {
+    await import("./translate.js");
+    const { z } = await import("zod");
+    expect(z.config().jitless).toBe(true);
+  });
+});
