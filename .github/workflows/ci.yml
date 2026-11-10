@@ -7,10 +7,14 @@ name: ci
 #   The tag each SHA was resolved from is in the trailing comment. Re-resolve with
 #   `git ls-remote --tags https://github.com/actions/<name>` when bumping.
 # - Dependencies install from the lockfile with lifecycle scripts disabled.
-# - The whole job runs with scripts/net-guard.cjs preloaded into every Node process
-#   (npm, tsc, the bundler, the test workers), so any attempt to open a
-#   non-loopback connection fails the build. Only `npm ci` itself runs without it,
-#   because fetching the locked tarballs from registry.npmjs.org is its job.
+# - Typecheck, build and tests run behind two independent layers:
+#   1. a network namespace whose only interface is loopback, so the kernel refuses
+#      every other connection — including from native binaries (TypeScript 7's tsc,
+#      the bundler's native core) that no JavaScript hook can see;
+#   2. scripts/net-guard.cjs preloaded into every Node process, which blocks and
+#      records what was attempted, so a failure says what tried to connect.
+#   Only `npm ci` runs outside them, because fetching the locked tarballs from
+#   registry.npmjs.org is its job.
 
 on:
   pull_request:
@@ -36,28 +40,35 @@ jobs:
       - name: Install from the lockfile, no lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Typecheck, build and test with outbound network blocked
+      - name: Typecheck, build and test with no route off the machine
         env:
           NODE_OPTIONS: --require ./scripts/net-guard.cjs
           NET_GUARD_BLOCK: "1"
           NET_GUARD_LOG: ${{ runner.temp }}/net-guard.jsonl
+        # Root creates the namespace and brings loopback up, then the build runs as the
+        # normal runner user. Values are passed explicitly because sudo resets PATH.
         run: |
-          npm run typecheck
-          npm run build
-          npx --no-install vitest run
+          sudo unshare --net -- env PATH="$PATH" sh -ec '
+            ip link set lo up
+            exec sudo -u "$1" env PATH="$PATH" HOME="$2" NODE_OPTIONS="$3" NET_GUARD_BLOCK=1 NET_GUARD_LOG="$4" \
+              sh -ec "npm run typecheck && npm run build && npx --no-install vitest run"
+          ' sh "$(id -un)" "$HOME" "$NODE_OPTIONS" "$NET_GUARD_LOG"
 
       - name: Show every connection the job attempted
         if: always()
         run: |
-          if [ -f "${{ runner.temp }}/net-guard.jsonl" ]; then
-            node -e '
-              const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse);
-              const attempts = lines.filter((l) => l.kind !== "loaded" && !l.local);
-              // test/net-guard.test.ts probes the reserved .invalid TLD to prove blocking works.
-              const selfTest = attempts.filter((l) => String(l.host).endsWith(".invalid"));
-              const remote = attempts.filter((l) => !String(l.host).endsWith(".invalid"));
-              console.log(`${lines.filter((l) => l.kind === "loaded").length} Node processes/threads guarded; ${selfTest.length} guard self-test probes blocked; ${remote.length} other non-loopback attempts`);
-              for (const r of remote) console.log(`  BLOCKED ${r.kind} ${r.host}:${r.port ?? "-"} ${r.url ?? ""}`);
-              process.exitCode = remote.length > 0 || selfTest.length === 0 ? 1 : 0;
-            ' "${{ runner.temp }}/net-guard.jsonl"
+          log="${{ runner.temp }}/net-guard.jsonl"
+          if [ ! -f "$log" ]; then
+            echo "::error::net-guard log missing: the guard never ran, so this run proves nothing"
+            exit 1
           fi
+          node -e '
+            const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse);
+            const attempts = lines.filter((l) => l.kind !== "loaded" && !l.local);
+            // test/net-guard.test.ts probes the reserved .invalid TLD to prove blocking works.
+            const selfTest = attempts.filter((l) => String(l.host).endsWith(".invalid"));
+            const remote = attempts.filter((l) => !String(l.host).endsWith(".invalid"));
+            console.log(`${lines.filter((l) => l.kind === "loaded").length} Node processes/threads guarded; ${selfTest.length} guard self-test probes blocked; ${remote.length} other non-loopback attempts`);
+            for (const r of remote) console.log(`  BLOCKED ${r.kind} ${r.host}:${r.port ?? "-"} ${r.url ?? ""}`);
+            process.exitCode = remote.length > 0 || selfTest.length === 0 ? 1 : 0;
+          ' "$log"

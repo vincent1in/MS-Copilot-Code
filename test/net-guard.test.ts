@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { lookup } from "node:dns/promises";
+import { lookup, resolve4 } from "node:dns/promises";
+import { Resolver } from "node:dns";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -17,6 +18,21 @@ describe("net-guard", () => {
 
   it("blocks DNS lookups of remote hosts", async () => {
     await expect(lookup("net-guard-selftest.invalid")).rejects.toMatchObject({ code: "ENETGUARD" });
+  });
+
+  it("blocks the c-ares resolver functions too", async () => {
+    await expect(resolve4("net-guard-selftest.invalid")).rejects.toMatchObject({ code: "ENETGUARD" });
+    const resolver = new Resolver();
+    await new Promise<void>((done) => {
+      resolver.resolve4("net-guard-selftest.invalid", (error) => {
+        expect(error).toMatchObject({ code: "ENETGUARD" });
+        done();
+      });
+    });
+  });
+
+  it("does not mistake a hostname starting with 127. for loopback", async () => {
+    await expect(fetch("http://127.net-guard-selftest.invalid/")).rejects.toMatchObject({ code: "ENETGUARD" });
   });
 
   it("still allows loopback", async () => {

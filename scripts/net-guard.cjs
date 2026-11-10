@@ -8,9 +8,15 @@
  *   NET_GUARD_BLOCK=1                throw on any non-loopback destination
  *
  * It hooks the layer every client ends up in: net.Socket.prototype.connect (plain
- * sockets, tls, http/https agents, undici/fetch, ws), plus dns lookups and fetch
- * (for readable URLs). Only host:port and URL origin+path are logged, never query
- * strings, so tokens carried in URLs do not reach the log.
+ * sockets, tls, http/https agents, undici/fetch, ws), plus dns.lookup, the c-ares
+ * resolver functions, and fetch (for readable URLs). Only host:port and URL
+ * origin+path are logged, never query strings, so tokens carried in URLs do not reach
+ * the log.
+ *
+ * Limits: it only sees JavaScript running in Node. Native code a command executes
+ * (TypeScript 7's tsc binary, the bundler's native core) and anything that is not Node
+ * are invisible to it; CI therefore also runs inside a network namespace with no route
+ * out (see .github/workflows/ci.yml).
  */
 const fs = require('node:fs');
 const net = require('node:net');
@@ -32,7 +38,8 @@ function record(entry) {
 function isLoopback(host) {
   if (host === undefined || host === null || host === '') return true; // Node defaults to localhost
   const h = String(host).replace(/^\[|\]$/g, '').toLowerCase();
-  return h === 'localhost' || h === '::1' || h === '::ffff:127.0.0.1' || /^127\./.test(h);
+  // A strict IPv4 check: a prefix test would let "127.attacker.example" through.
+  return h === 'localhost' || h === '::1' || h === '::ffff:127.0.0.1' || /^127(?:\.\d{1,3}){3}$/.test(h);
 }
 
 function guard(kind, host, port, extra = {}) {
@@ -89,6 +96,33 @@ dns.promises.lookup = async function lookup(hostname, ...rest) {
   guard('dns', hostname, null);
   return originalPromiseLookup.call(this, hostname, ...rest);
 };
+
+// 2b. The c-ares resolver functions (dns.resolve*, dns.reverse, dns.Resolver and their
+// promise forms) send DNS queries without going through dns.lookup.
+function wrapResolver(target, label) {
+  for (const name of Object.getOwnPropertyNames(target)) {
+    if (!/^(resolve|reverse)/.test(name) || typeof target[name] !== 'function') continue;
+    const original = target[name];
+    target[name] = function guardedResolver(hostname, ...rest) {
+      try {
+        guard('dns', hostname, null, { via: `${label}.${name}` });
+      } catch (error) {
+        const callback = rest[rest.length - 1];
+        if (typeof callback === 'function') {
+          process.nextTick(callback, error);
+          return undefined;
+        }
+        if (label.includes('promises')) return Promise.reject(error);
+        throw error;
+      }
+      return original.call(this, hostname, ...rest);
+    };
+  }
+}
+wrapResolver(dns, 'dns');
+wrapResolver(dns.Resolver.prototype, 'dns.Resolver');
+wrapResolver(dns.promises, 'dns.promises');
+wrapResolver(dns.promises.Resolver.prototype, 'dns.promises.Resolver');
 
 // 3. fetch: log the URL (origin + path only) before undici opens its socket.
 if (typeof globalThis.fetch === 'function') {
