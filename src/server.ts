@@ -311,7 +311,10 @@ async function handleChatCompletion(
 ): Promise<void> {
   let body: ChatRequest;
   try {
-    body = ChatCompletionRequest.parse(JSON.parse(await readBody(request, context.maxBodyBytes)));
+    // `jitless` per call: zod v4 otherwise compiles a fast-path parser with
+    // `new Function`. Passing it here rather than via z.config() matters: zod keeps its
+    // config on globalThis, so a global setting would also change opencode's own zod.
+    body = ChatCompletionRequest.parse(JSON.parse(await readBody(request, context.maxBodyBytes)), { jitless: true });
   } catch (error) {
     if (error instanceof PayloadTooLargeError) {
       sendError(response, 413, "request_too_large", error.message);

@@ -339,6 +339,22 @@ describe("Bing web search on coding turns", () => {
   });
 });
 
+describe("request parsing", () => {
+  it("parses every chat request jitless, so zod generates no code", async () => {
+    const { ChatCompletionRequest } = await import("../src/translate.js");
+    const parse = vi.spyOn(ChatCompletionRequest, "parse");
+    try {
+      stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
+      const { url } = await start({ resolveAgent: undefined });
+      await post(url, { model: "quick", messages: [{ role: "user", content: "hi" }] });
+      expect(parse).toHaveBeenCalled();
+      for (const call of parse.mock.calls) expect(call[1]).toEqual({ jitless: true });
+    } finally {
+      parse.mockRestore();
+    }
+  });
+});
+
 describe("no mailbox-grounded models (removed in this fork)", () => {
   it("does not advertise the work models", async () => {
     const { url, apiKey } = await start();
