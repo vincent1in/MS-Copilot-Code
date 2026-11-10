@@ -12,6 +12,7 @@ import {
   buildProviderInfo,
   describeToolSelection,
   mergeOpencodeConfig,
+  PACKAGE_NAME,
   resolveOptions,
   selectLeanTools,
   studioAgentEnabled,
@@ -189,6 +190,20 @@ describe("plugin options", () => {
   it("ignores option values of the wrong type instead of crashing the plugin", () => {
     // opencode passes plugin options straight from user JSON.
     expect(resolveOptions({ lean: "yes" as unknown as boolean }).lean).toBe(true);
+  });
+});
+
+describe("setup never leaves opencode resolving the plugin from npm", () => {
+  it("replaces an upstream npm-name entry with this checkout's directory", () => {
+    const pluginDir = "/home/me/src/opencode-m365-copilot";
+    const merged = mergeOpencodeConfig(
+      { plugins: ["opencode-m365-copilot", "some-other-plugin"] },
+      { pluginRef: `${pluginDir}/dist/plugin.mjs`, pluginDir, inspect: () => ({ exists: true, packageName: PACKAGE_NAME }) },
+    );
+    const specs = JSON.stringify(merged.plugins);
+    expect(specs).toContain(pluginDir);
+    expect(specs).toContain("some-other-plugin");
+    expect((merged.plugins as unknown[]).some((entry) => entry === "opencode-m365-copilot")).toBe(false);
   });
 });
 

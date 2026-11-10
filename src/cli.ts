@@ -50,7 +50,8 @@ function printHelp(): void {
 
   login                   Sign in to Microsoft 365 in a browser window (SSO/MFA by
                           hand, once) and store the token cache
-  setup [--local]         Add the plugin to ~/.config/opencode/opencode.json
+  setup                   Point ~/.config/opencode/opencode.json at this checkout's
+                          build (never at an npm package name)
   serve [--port <n>]      Run the OpenAI-compatible proxy standalone
                           (key from M365_PROXY_KEY, else printed)
   doctor [--live]         Check auth, the agent, and the proxy
@@ -81,16 +82,19 @@ async function doLogin(args: string[]): Promise<void> {
 }
 
 async function doSetup(args: string[]): Promise<void> {
-  // An npm install is referenced by name, a local checkout by its directory —
-  // opencode 2 refuses a file path. `pluginRef` is how older versions referenced us
-  // under opencode 1's key, so that entry can be found and removed; see
-  // `mergeOpencodeConfig`.
-  const local = args.includes("--local");
+  // Always this checkout's build, referenced by its directory (opencode 2 refuses a
+  // file path). Upstream defaulted to the npm name, which makes opencode install the
+  // published upstream package — code nobody here reviewed — on its next start. This
+  // fork is private and never published, so a name could only ever resolve to
+  // someone else's package. `--local` is accepted and ignored. `pluginRef` is how
+  // older versions referenced us under opencode 1's key, so that entry can be found
+  // and removed; see `mergeOpencodeConfig`, which also replaces an upstream npm entry.
+  void args;
   const dist = dirname(fileURLToPath(import.meta.url));
-  const pluginRef = local ? resolve(dist, "plugin.mjs") : "opencode-m365-copilot";
-  const pluginDir = local ? resolve(dist, "..") : pluginRef;
+  const pluginRef = resolve(dist, "plugin.mjs");
+  const pluginDir = resolve(dist, "..");
 
-  if (local && !existsSync(pluginRef)) {
+  if (!existsSync(pluginRef)) {
     console.error(`No build at ${pluginRef}. Run \`npm run build\` first.`);
     process.exitCode = 1;
     return;
