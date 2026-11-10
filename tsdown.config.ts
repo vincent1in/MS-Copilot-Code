@@ -33,5 +33,5 @@ export default defineConfig({
   external: [/^node:/, "playwright", "@opencode/plugin"],
   // tsdown externalises anything in `dependencies` by default, so listing them here is
   // what actually pulls them into the bundle. Keep this list and `dependencies` in step.
-  noExternal: ["zod", "ws", "otpauth", "@azure/msal-node"],
+  noExternal: ["zod", "ws", "@azure/msal-node"],
 });

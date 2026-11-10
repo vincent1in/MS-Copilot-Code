@@ -11,6 +11,10 @@ import { join } from "node:path";
 export const CONFIG_DIR = process.env.M365_CONFIG_DIR || join(homedir(), ".config", "opencode-copilot");
 
 export const CACHE_FILE = process.env.M365_CACHE_FILE || join(CONFIG_DIR, "msal-cache.json");
+/**
+ * Upstream's stored-credentials file (password + TOTP seed). Never read by this fork;
+ * kept only so `doctor` can warn that a leftover copy should be deleted.
+ */
 export const SECRETS_FILE = process.env.M365_SECRETS_FILE || join(CONFIG_DIR, "secrets.json");
 export const AGENT_FILE = process.env.M365_AGENT_FILE || join(CONFIG_DIR, "agent-id.json");
 export const LOG_FILE = join(CONFIG_DIR, "debug.log");

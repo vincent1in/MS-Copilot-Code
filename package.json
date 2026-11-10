@@ -34,7 +34,6 @@
   },
   "dependencies": {
     "@azure/msal-node": "7.2.1",
-    "otpauth": "9.6.0",
     "ws": "8.22.2",
     "zod": "4.6.7"
   },

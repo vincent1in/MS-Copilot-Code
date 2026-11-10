@@ -1,87 +1,21 @@
-import { chmodSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { loadSecrets, normaliseTotpSecret, totpCode } from "./login.js";
 
-const tempFile = (contents: string) => {
-  const file = join(mkdtempSync(join(tmpdir(), "m365-login-")), "secrets.json");
-  writeFileSync(file, contents);
-  return file;
-};
-
-describe("stored credentials", () => {
-  it("returns undefined when there is no secrets file", () => {
-    expect(loadSecrets(join(tmpdir(), "definitely-not-here.json"))).toBeUndefined();
+/**
+ * This fork removed upstream's automated sign-in (a stored password plus a TOTP seed in
+ * secrets.json). These pin that it stays removed.
+ */
+describe("sign-in", () => {
+  it("exposes only interactive login — no credential loading or TOTP helpers", async () => {
+    const exported = Object.keys(await import("./login.js")).sort();
+    expect(exported).toEqual(["login"]);
   });
 
-  it("reads email, password and the TOTP seed", () => {
-    const file = tempFile(JSON.stringify({ email: "a@b.com", password: "pw", mfaSecret: "JBSWY3DPEHPK3PXP" }));
-    expect(loadSecrets(file)).toEqual({ email: "a@b.com", password: "pw", mfaSecret: "JBSWY3DPEHPK3PXP" });
-  });
-
-  it("accepts a file with no TOTP seed — that tenant signs in interactively", () => {
-    const file = tempFile(JSON.stringify({ email: "a@b.com", password: "pw" }));
-    expect(loadSecrets(file)?.mfaSecret).toBeUndefined();
-  });
-
-  it("names the missing field rather than failing obscurely later", () => {
-    const file = tempFile(JSON.stringify({ email: "a@b.com" }));
-    expect(() => loadSecrets(file)).toThrow(/password/);
-  });
-
-  it("reports invalid JSON clearly", () => {
-    expect(() => loadSecrets(tempFile("{not json"))).toThrow(/not valid JSON/);
-  });
-
-  describe.runIf(process.platform !== "win32")("file permissions", () => {
-    // The password and the TOTP seed together are both factors: anyone who can read
-    // this file can complete MFA as the user.
-    const valid = JSON.stringify({ email: "a@b.com", password: "pw", mfaSecret: "JBSWY3DPEHPK3PXP" });
-
-    it("tightens a group- or world-readable secrets file to 0600 and says so", () => {
-      const file = tempFile(valid);
-      chmodSync(file, 0o644);
-      const warnings: string[] = [];
-      expect(loadSecrets(file, { warn: (message) => warnings.push(message) })?.email).toBe("a@b.com");
-      expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(warnings.join("\n")).toMatch(/0600|readable/);
-    });
-
-    it("stays quiet about a file that is already owner-only", () => {
-      const file = tempFile(valid);
-      chmodSync(file, 0o600);
-      const warnings: string[] = [];
-      loadSecrets(file, { warn: (message) => warnings.push(message) });
-      expect(warnings).toEqual([]);
-    });
-  });
-});
-
-describe("TOTP seed handling", () => {
-  it("accepts a bare base32 seed", () => {
-    expect(normaliseTotpSecret("JBSWY3DPEHPK3PXP")).toBe("JBSWY3DPEHPK3PXP");
-  });
-
-  it("extracts the seed from an otpauth:// URI", () => {
-    const uri = "otpauth://totp/Contoso:you@contoso.com?secret=JBSWY3DPEHPK3PXP&issuer=Contoso";
-    expect(normaliseTotpSecret(uri)).toBe("JBSWY3DPEHPK3PXP");
-  });
-
-  it("strips the spaces that password managers display", () => {
-    expect(normaliseTotpSecret("jbsw y3dp ehpk 3pxp")).toBe("JBSWY3DPEHPK3PXP");
-  });
-
-  it("rejects a 6-digit code with an explanation", () => {
-    // Easy mistake: the seed is what generates codes, not a code itself.
-    expect(() => normaliseTotpSecret("123456")).toThrow(/6-digit code/);
-  });
-
-  it("rejects something that is not base32 at all", () => {
-    expect(() => normaliseTotpSecret("this-is-not-base32!")).toThrow(/base32/);
-  });
-
-  it("generates a six digit code from a seed", async () => {
-    expect(await totpCode("JBSWY3DPEHPK3PXP")).toMatch(/^\d{6}$/);
+  it("never reads a secrets file, a password or a TOTP seed", () => {
+    const source = readFileSync(new URL("./login.ts", import.meta.url), "utf8");
+    // Comments may explain the removal; the code itself must not reference any of it.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).not.toMatch(/SECRETS_FILE|secrets\.json|password|passwd|mfaSecret|totp|otpauth/i);
+    expect(code).toMatch(/headless:\s*false/);
   });
 });

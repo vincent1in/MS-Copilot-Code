@@ -48,7 +48,8 @@ async function main(): Promise<void> {
 function printHelp(): void {
   console.log(`opencode-m365 — use Microsoft 365 Copilot as opencode's model backend
 
-  login [--interactive]   Sign in to Microsoft 365 and store the token cache
+  login                   Sign in to Microsoft 365 in a browser window (SSO/MFA by
+                          hand, once) and store the token cache
   setup [--local]         Add the plugin to ~/.config/opencode/opencode.json
   serve [--port <n>]      Run the OpenAI-compatible proxy standalone
                           (key from M365_PROXY_KEY, else printed)
@@ -57,27 +58,24 @@ function printHelp(): void {
 
 Config lives in ${CONFIG_DIR}
 
-Sign-in needs either a TOTP seed in secrets.json (headless), or --interactive
-to complete SSO/MFA by hand once — the only option on tenants with push-only
-MFA, FIDO2, or a federated IdP.`);
+Sign-in is interactive only. Use a browser you already have with
+M365_BROWSER_CHANNEL=msedge (or chrome), or CHROMIUM_PATH=/path/to/browser.`);
 }
 
 async function doLogin(args: string[]): Promise<void> {
   // Imported here so the heavy browser dependency never loads for other commands.
   const { login } = await import("./login.js");
-  const interactive = args.includes("--interactive");
+  // Always interactive in this fork; `--interactive` is accepted and ignored so old
+  // instructions keep working.
+  void args;
 
   try {
-    const account = await login({ interactive, onStatus: (message) => console.log(`  ${message}`) });
+    const account = await login({ onStatus: (message) => console.log(`  ${message}`) });
     console.log(`\nSigned in as ${account}.`);
     console.log(`Token cache written to ${CACHE_FILE}`);
     console.log("\nNext: opencode-m365 setup");
   } catch (error) {
     console.error(`\nSign-in failed: ${(error as Error).message}`);
-    if (!interactive) {
-      console.error("\nIf your tenant has no TOTP option (push-only MFA, FIDO2, Okta/Ping/Duo),");
-      console.error("try: opencode-m365 login --interactive");
-    }
     process.exitCode = 1;
   }
 }
@@ -197,7 +195,11 @@ async function doDoctor(args: string[]): Promise<void> {
   console.log("Config");
   check("config directory", existsSync(CONFIG_DIR), CONFIG_DIR);
   check("token cache", existsSync(CACHE_FILE), existsSync(CACHE_FILE) ? CACHE_FILE : "run `opencode-m365 login`");
-  console.log(`  ..    stored credentials — ${existsSync(SECRETS_FILE) ? "present" : "absent (interactive login only)"}`);
+  if (existsSync(SECRETS_FILE)) {
+    // Left over from upstream's automated sign-in. This fork never reads it, but it
+    // still holds a password and a TOTP seed in plain text.
+    console.log(`  WARN  ${SECRETS_FILE} exists — it holds a password and TOTP seed and is never read by this fork. Delete it.`);
+  }
 
   console.log("\nAuthentication");
   const tokens = createTokenClient();
