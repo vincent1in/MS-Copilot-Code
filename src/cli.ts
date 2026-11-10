@@ -54,7 +54,8 @@ function printHelp(): void {
                           build (never at an npm package name)
   serve [--port <n>]      Run the OpenAI-compatible proxy standalone
                           (key from M365_PROXY_KEY, else printed)
-  doctor [--live]         Check auth, the agent, and the proxy
+  doctor [--live]         Check auth, the proxy and opencode wiring (read-only:
+                          never provisions the Copilot Studio agent)
                           (--live also sends one short message per model tone)
 
 Config lives in ${CONFIG_DIR}
@@ -171,9 +172,9 @@ async function doServe(args: string[]): Promise<void> {
 
   console.log(`M365 Copilot proxy listening on ${proxy.url}`);
   console.log(`  models:      ${proxy.url}/v1/models`);
-  console.log(`  studio agent: ${useStudioAgent ? "enabled (M365_STUDIO_AGENT=1)" : "disabled — nothing is created in your tenant"}`);
-  console.log(`  web search:  ${webSearchEnabled() ? "enabled (M365_WEB_SEARCH=1)" : "disabled — Copilot is not offered Bing on coding turns"}`);
   console.log(`  completions: ${proxy.url}/v1/chat/completions`);
+  console.log(`  studio agent: ${useStudioAgent ? "enabled (M365_STUDIO_AGENT=1)" : "disabled — nothing is created in your tenant"}`);
+  console.log(`  web search:   ${webSearchEnabled() ? "enabled (M365_WEB_SEARCH=1)" : "disabled — Copilot is not offered Bing on coding turns"}`);
   console.log("\nLoopback-only. Every request must send `Authorization: Bearer <key>`;");
   console.log("browser origins and CORS are refused.");
   if (fixedKey) {
