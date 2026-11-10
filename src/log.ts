@@ -12,6 +12,25 @@ const TO_STDOUT = process.env.M365_LOG_STDOUT === "1";
  */
 const appendLog = createPrivateAppender(LOG_FILE);
 
+/**
+ * Credentials that must never reach a log line, whatever is being logged: the chat
+ * URL's `access_token` query parameter, bearer headers, JWT-shaped strings (every
+ * Entra token is one), and token fields in JSON. Applied to every line, including
+ * under M365_TRACE and in the M365_TURN_LOG file.
+ */
+const REDACTIONS: ReadonlyArray<[RegExp, string]> = [
+  [/(access_token=)[^&\s"'<>]+/gi, "$1[REDACTED]"],
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]"],
+  [/("(?:access_token|refresh_token|id_token|client_info|secret)"\s*:\s*")[^"]*"/gi, '$1[REDACTED]"'],
+  [/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, "[REDACTED_JWT]"],
+];
+
+export function redact(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
+  return out;
+}
+
 /** Truncate a payload for the log unless full tracing is on. */
 export function trunc(value: unknown, max = 400): string {
   const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -34,7 +53,7 @@ export interface Logger {
 export function createLogger(scope: string): Logger {
   const write = (level: string, parts: unknown[]) => {
     if (!DEBUG) return;
-    const line = `${new Date().toISOString()} [${level}] [${scope}] ${parts.map((p) => trunc(p)).join(" ")}`;
+    const line = redact(`${new Date().toISOString()} [${level}] [${scope}] ${parts.map((p) => trunc(p)).join(" ")}`);
     if (TO_STDOUT) process.stdout.write(`${line}\n`);
     try {
       appendLog(`${line}\n`);

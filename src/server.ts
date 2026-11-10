@@ -35,7 +35,7 @@ import {
 import { collectImages } from "./image.js";
 import { parseToolCalls } from "./fenced.js";
 import { looksLikeGiveUp, nudgeFor } from "./giveup.js";
-import { createLogger } from "./log.js";
+import { createLogger, redact } from "./log.js";
 
 const log = createLogger("server");
 
@@ -390,7 +390,7 @@ function defaultTurnLog(): ((entry: TurnLogEntry) => void) | null {
   if (envTurnLog === undefined) {
     const file = process.env.M365_TURN_LOG;
     const append = file ? createPrivateAppender(file) : null;
-    envTurnLog = append ? (entry) => append(`${JSON.stringify(entry)}\n`) : null;
+    envTurnLog = append ? (entry) => append(`${redact(JSON.stringify(entry))}\n`) : null;
   }
   return envTurnLog;
 }
