@@ -21,7 +21,10 @@
  * Either way it is a one-time cost — afterwards `auth.ts` refreshes silently.
  */
 
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AUTHORITY, CLIENT_ID, REDIRECT_URI, SYDNEY_SCOPES, authCodeFromUrl, createCachePlugin } from "./auth.js";
 import { createGuardedNetworkClient } from "./egress.js";
 import { CONFIG_DIR } from "./paths.js";
@@ -124,15 +127,32 @@ async function captureAuthCode(authUrl: string, options: LoginOptions): Promise<
   }
 }
 
+/**
+ * Load Playwright from **this checkout's own** `node_modules`, nowhere else.
+ *
+ * A bare `import("playwright")` walks every `node_modules` in every parent directory, so
+ * a package planted anywhere up the tree would run during sign-in. Resolution is pinned
+ * to the checkout (the directory above `dist/`, or above `src/` in tests) and the result
+ * must really live inside it.
+ */
 async function importPlaywright(): Promise<any> {
+  const checkout = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const requireFromCheckout = createRequire(join(checkout, "package.json"));
+  let entry: string;
   try {
-    return await import("playwright");
+    entry = requireFromCheckout.resolve("playwright");
   } catch {
     throw new Error(
-      "Playwright is not installed. It is an optional peer dependency, deliberately not pulled in by the plugin itself. " +
-        "Install it next to this checkout with `npm i --no-save --ignore-scripts playwright`, then either point it at a " +
-        "browser you already have (M365_BROWSER_CHANNEL=msedge or chrome, or CHROMIUM_PATH=/path/to/browser) or download " +
-        "Playwright's Chromium explicitly with `npx playwright install chromium`.",
+      "Playwright is not installed in this checkout. It is an optional peer dependency, deliberately not pulled in by the plugin itself. " +
+        "From the checkout directory run `npm i --no-save --ignore-scripts playwright`, then either point it at a browser you already " +
+        "have (M365_BROWSER_CHANNEL=msedge or chrome, or CHROMIUM_PATH=/path/to/browser) or download Playwright's Chromium explicitly " +
+        "with `npx playwright install chromium`.",
     );
   }
+  const root = realpathSync(checkout);
+  const real = realpathSync(entry);
+  if (!real.startsWith(`${root}${sep}`)) {
+    throw new Error(`Refusing to load Playwright from ${real}: it must be installed inside this checkout (${root}).`);
+  }
+  return requireFromCheckout("playwright");
 }

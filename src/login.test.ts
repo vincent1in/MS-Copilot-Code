@@ -18,4 +18,12 @@ describe("sign-in", () => {
     expect(code).not.toMatch(/SECRETS_FILE|secrets\.json|password|passwd|mfaSecret|totp|otpauth/i);
     expect(code).toMatch(/headless:\s*false/);
   });
+
+  it("loads Playwright only from this checkout, never by a bare import that walks parent directories", () => {
+    const source = readFileSync(new URL("./login.ts", import.meta.url), "utf8");
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).not.toMatch(/import\(\s*["']playwright["']\s*\)/);
+    expect(code).toMatch(/createRequire\(join\(checkout, "package\.json"\)\)/);
+    expect(code).toMatch(/realpathSync\(entry\)/);
+  });
 });

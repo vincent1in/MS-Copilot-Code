@@ -1,4 +1,8 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "tsdown";
+
+// See src/stubs/no-optional-native.ts: never resolve ws's optional add-ons from disk.
+const noOptionalNative = fileURLToPath(new URL("./src/stubs/no-optional-native.ts", import.meta.url));
 
 export default defineConfig({
   entry: ["src/plugin.ts", "src/server.ts", "src/cli.ts"],
@@ -34,4 +38,8 @@ export default defineConfig({
   // tsdown externalises anything in `dependencies` by default, so listing them here is
   // what actually pulls them into the bundle. Keep this list and `dependencies` in step.
   noExternal: ["zod", "ws", "@azure/msal-node"],
+  alias: {
+    bufferutil: noOptionalNative,
+    "utf-8-validate": noOptionalNative,
+  },
 });
