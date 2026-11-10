@@ -437,7 +437,10 @@ export function stripInventedJson(text: string): string {
 
   // Only strip when the object stands alone on its own line(s) — an inline example
   // inside prose is content, not noise.
-  result = result.replace(/^\s*\{\s*"confidence"\s*:\s*[^}]*\}\s*$/gm, "");
+  // `^[ \t]*`, not `^\s*`: under the m flag `\s` also eats newlines, so every line
+  // start rescanned the rest of the reply — 40k blank lines took ~4 s on opencode's
+  // event loop. Indentation is all a standalone line can have before the object.
+  result = result.replace(/^[ \t]*\{\s*"confidence"\s*:\s*[^}]*\}\s*$/gm, "");
 
   const lone = /^\s*\{\s*"final"\s*:\s*("(?:[^"\\]|\\.)*")\s*\}\s*$/.exec(result.trim());
   if (lone) {
@@ -448,7 +451,7 @@ export function stripInventedJson(text: string): string {
     }
   }
 
-  result = result.replace(/^\s*\{\s*"final"\s*:\s*(?:"(?:[^"\\]|\\.)*"|[^}]*)\}\s*$/gm, "");
+  result = result.replace(/^[ \t]*\{\s*"final"\s*:\s*(?:"(?:[^"\\]|\\.)*"|[^}]*)\}\s*$/gm, "");
   return result.trim();
 }
 
