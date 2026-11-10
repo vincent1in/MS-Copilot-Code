@@ -273,8 +273,20 @@ export interface PluginPathInfo {
   packageName?: string;
 }
 
-/** The npm name this package publishes under — what a checkout's package.json says. */
-export const PACKAGE_NAME = "opencode-m365-copilot";
+/**
+ * This fork's package name — what a checkout's package.json says. It is private and
+ * never published: setup always registers the local build by path, so opencode can
+ * never resolve this plugin from the npm registry.
+ */
+export const PACKAGE_NAME = "@vincent1in/opencode-m365-copilot";
+
+/**
+ * The upstream npm package this fork was taken from. Still recognised as "ours" so
+ * that setup replaces an upstream entry (which opencode would install from npm, i.e.
+ * unreviewed code) with this fork's local path.
+ */
+export const UPSTREAM_PACKAGE_NAME = "opencode-m365-copilot";
+const KNOWN_PACKAGE_NAMES: readonly string[] = [PACKAGE_NAME, UPSTREAM_PACKAGE_NAME];
 
 /** Every option key this plugin reads; anything else belongs to another plugin. */
 const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<keyof PluginOptions>([
@@ -423,11 +435,11 @@ function isOurPluginRef(
   inspect: (path: string) => PluginPathInfo,
 ): boolean {
   if (ref === incoming) return true;
-  if (ref.includes(PACKAGE_NAME) || ref.includes("opencode-copilot-plugin")) return true;
+  if (ref.includes(UPSTREAM_PACKAGE_NAME) || ref.includes("opencode-copilot-plugin")) return true;
   if (tail(ref) === "" || tail(ref) !== tail(incoming)) return false;
 
   const info = inspect(ref);
-  if (info.exists) return info.packageName === PACKAGE_NAME;
+  if (info.exists) return info.packageName !== undefined && KNOWN_PACKAGE_NAMES.includes(info.packageName);
   // No options at all counts as ours — see the doc comment for why.
   return Object.keys(options ?? {}).every((key) => OUR_OPTION_KEYS.has(key));
 }
