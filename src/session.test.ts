@@ -168,10 +168,24 @@ describe("agent attachment", () => {
     expect(chatFrame(stub).arguments[0].plugins).toBeUndefined();
   });
 
-  it("sends the built-in search plugin when there is no agent", async () => {
+  it("does not offer Bing web search by default, even without an agent", async () => {
+    // Upstream sent BingWebSearch on every agent-less turn; on a coding turn that lets
+    // Copilot turn parts of your code into Bing queries.
     stub = await startStubCopilot();
     await sessionFor(stub).run("hi");
+    expect(chatFrame(stub).arguments[0].plugins).toBeUndefined();
+  });
+
+  it("offers Bing web search only when the turn opts in", async () => {
+    stub = await startStubCopilot();
+    await sessionFor(stub).run("hi", { webSearch: true });
     expect(chatFrame(stub).arguments[0].plugins).toEqual([{ Id: "BingWebSearch", Source: "BuiltIn" }]);
+  });
+
+  it("never offers Bing alongside an agent, opt-in or not", async () => {
+    stub = await startStubCopilot();
+    await sessionFor(stub).run("hi", { agentId: "T_123.abc.gpt.default", webSearch: true });
+    expect(chatFrame(stub).arguments[0].plugins).toBeUndefined();
   });
 });
 

@@ -10,7 +10,7 @@
 
 import { getOrCreateAgent } from "./agent.js";
 import { createTokenClient } from "./auth.js";
-import { resolveOptions, studioAgentEnabled, type PluginOptions } from "./config.js";
+import { resolveOptions, studioAgentEnabled, webSearchEnabled, type PluginOptions } from "./config.js";
 import { createLogger } from "./log.js";
 import { startServer } from "./server.js";
 
@@ -89,6 +89,7 @@ export async function startRuntime(rawOptions?: Record<string, unknown>): Promis
       ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
       : {}),
     lean: options.lean,
+    webSearch: webSearchEnabled(options),
     // Normally absent, so the proxy mints a fresh secret for this launch.
     ...(sharedKey ? { apiKey: sharedKey } : {}),
     ...(options.leanSystemPrompt ? { leanSystemPrompt: LEAN_SYSTEM_PROMPT } : {}),

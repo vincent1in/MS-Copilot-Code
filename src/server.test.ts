@@ -296,6 +296,24 @@ describe("chat completions", () => {
   });
 });
 
+describe("Bing web search on coding turns", () => {
+  const chatArg = (server: StubServer) => server.last().frames.find((f) => f.type === 4).arguments[0];
+
+  it("is not offered unless the proxy was started with webSearch", async () => {
+    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
+    const { url } = await start({ resolveAgent: undefined });
+    await post(url, { model: "quick", messages: [{ role: "user", content: "hi" }] });
+    expect(chatArg(stub).plugins).toBeUndefined();
+  });
+
+  it("is offered on agent-less turns when the proxy opts in", async () => {
+    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
+    const { url } = await start({ resolveAgent: undefined, webSearch: true });
+    await post(url, { model: "quick", messages: [{ role: "user", content: "hi" }] });
+    expect(chatArg(stub).plugins).toEqual([{ Id: "BingWebSearch", Source: "BuiltIn" }]);
+  });
+});
+
 describe("no mailbox-grounded models (removed in this fork)", () => {
   it("does not advertise the work models", async () => {
     const { url, apiKey } = await start();

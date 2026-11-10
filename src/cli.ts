@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTokenClient } from "./auth.js";
 import { getOrCreateAgent } from "./agent.js";
-import { PROVIDER_ID, mergeOpencodeConfig, studioAgentEnabled, type PluginPathInfo } from "./config.js";
+import { PROVIDER_ID, mergeOpencodeConfig, studioAgentEnabled, webSearchEnabled, type PluginPathInfo } from "./config.js";
 import { checkTones, distinctTones } from "./live-check.js";
 import { DEFAULT_MODEL, LOCAL_TITLE_MODEL, MODELS } from "./models.js";
 import { CopilotSession } from "./session.js";
@@ -160,6 +160,7 @@ async function doServe(args: string[]): Promise<void> {
     ...(useStudioAgent
       ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
       : {}),
+    webSearch: webSearchEnabled(),
     port,
     ...(fixedKey ? { apiKey: fixedKey } : {}),
   });
@@ -167,6 +168,7 @@ async function doServe(args: string[]): Promise<void> {
   console.log(`M365 Copilot proxy listening on ${proxy.url}`);
   console.log(`  models:      ${proxy.url}/v1/models`);
   console.log(`  studio agent: ${useStudioAgent ? "enabled (M365_STUDIO_AGENT=1)" : "disabled — nothing is created in your tenant"}`);
+  console.log(`  web search:  ${webSearchEnabled() ? "enabled (M365_WEB_SEARCH=1)" : "disabled — Copilot is not offered Bing on coding turns"}`);
   console.log(`  completions: ${proxy.url}/v1/chat/completions`);
   console.log("\nLoopback-only. Every request must send `Authorization: Bearer <key>`;");
   console.log("browser origins and CORS are refused.");

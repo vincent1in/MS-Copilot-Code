@@ -144,6 +144,13 @@ export interface PluginOptions {
    * `M365_STUDIO_AGENT=1` turns it on for the CLI and the plugin alike.
    */
   studioAgent: boolean;
+  /**
+   * Let Copilot use its built-in Bing web search on coding turns. OFF by default in
+   * this fork: with it on, Copilot may send parts of your prompt — including code —
+   * to Bing as search queries. `M365_WEB_SEARCH=1` turns it on for the CLI and the
+   * plugin alike.
+   */
+  webSearch: boolean;
   /** Use an already-running proxy instead of starting one in-process. */
   baseUrl?: string;
   /**
@@ -160,6 +167,11 @@ export interface PluginOptions {
  */
 export function studioAgentEnabled(options?: Pick<PluginOptions, "studioAgent">): boolean {
   return options?.studioAgent === true || process.env.M365_STUDIO_AGENT === "1";
+}
+
+/** Is Bing web search allowed on coding turns? The plugin option, or `M365_WEB_SEARCH=1`. */
+export function webSearchEnabled(options?: Pick<PluginOptions, "webSearch">): boolean {
+  return options?.webSearch === true || process.env.M365_WEB_SEARCH === "1";
 }
 
 /** Where the proxy is, and the bearer secret it requires. */
@@ -184,6 +196,7 @@ export function resolveOptions(raw: Partial<PluginOptions> | undefined): PluginO
     setSmallModel: bool(options.setSmallModel, true),
     leanSystemPrompt: bool(options.leanSystemPrompt, false),
     studioAgent: bool(options.studioAgent, false),
+    webSearch: bool(options.webSearch, false),
     baseUrl: typeof options.baseUrl === "string" ? options.baseUrl : undefined,
     apiKey: typeof options.apiKey === "string" && options.apiKey !== "" ? options.apiKey : undefined,
   };
@@ -315,6 +328,7 @@ const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<keyof PluginOptions>([
   "setSmallModel",
   "leanSystemPrompt",
   "studioAgent",
+  "webSearch",
   "baseUrl",
   "apiKey",
 ]);

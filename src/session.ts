@@ -157,6 +157,12 @@ export interface TurnOptions {
   tone?: string;
   /** Declarative agent id, when the turn needs server-side tool instructions. */
   agentId?: string | null;
+  /**
+   * Offer Copilot its built-in Bing web search plugin on an agent-less turn. Off by
+   * default in this fork: with it, Copilot may turn parts of the prompt — which on a
+   * coding turn includes your code — into Bing queries.
+   */
+  webSearch?: boolean;
   signal?: AbortSignal;
   onDelta?: (chunk: string) => void;
   /**
@@ -438,7 +444,10 @@ export class CopilotSession {
           clientOverrides: { capabilities: [], "deepResearchModels@odata.type": "Collection(String)" },
         },
       ];
-    } else {
+    } else if (turn.webSearch) {
+      // Opt-in only (see TurnOptions.webSearch). Upstream sent this on every
+      // agent-less turn; omitting it matches the request shape of an agent turn,
+      // which never carries `plugins`.
       argument.plugins = [{ Id: "BingWebSearch", Source: "BuiltIn" }];
     }
 

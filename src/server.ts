@@ -73,6 +73,8 @@ export interface ServerDeps {
   endpoint?: string;
   /** Keep every tool call the model emits rather than only the first. */
   allowMultiTool?: boolean;
+  /** Offer Copilot's Bing web search plugin on agent-less turns. Off by default. */
+  webSearch?: boolean;
   /**
    * Trim the harness's toolset before the model sees it.
    *
@@ -458,6 +460,7 @@ async function runTurn(
   const turnOptions = {
     ...(model.tone ? { tone: model.tone } : {}),
     agentId: agent,
+    ...(context.deps.webSearch ? { webSearch: true } : {}),
     signal: abort.signal,
   };
   const recordTurn = (result: TurnResult, extra: Partial<TurnLogEntry> = {}) =>

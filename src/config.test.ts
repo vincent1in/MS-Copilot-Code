@@ -15,6 +15,7 @@ import {
   resolveOptions,
   selectLeanTools,
   studioAgentEnabled,
+  webSearchEnabled,
 } from "./config.js";
 
 const names = (tools: readonly ToolDef[]) => tools.map((tool) => tool.function.name);
@@ -167,6 +168,21 @@ describe("plugin options", () => {
     } finally {
       if (saved === undefined) delete process.env.M365_STUDIO_AGENT;
       else process.env.M365_STUDIO_AGENT = saved;
+    }
+  });
+
+  it("keeps Bing web search off on coding turns unless explicitly asked for", () => {
+    const saved = process.env.M365_WEB_SEARCH;
+    delete process.env.M365_WEB_SEARCH;
+    try {
+      expect(resolveOptions({}).webSearch).toBe(false);
+      expect(webSearchEnabled(resolveOptions({}))).toBe(false);
+      expect(webSearchEnabled(resolveOptions({ webSearch: true }))).toBe(true);
+      process.env.M365_WEB_SEARCH = "1";
+      expect(webSearchEnabled()).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.M365_WEB_SEARCH;
+      else process.env.M365_WEB_SEARCH = saved;
     }
   });
 
