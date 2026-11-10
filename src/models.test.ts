@@ -59,9 +59,23 @@ describe("model catalog", () => {
     expect(toneFor("something-we-never-shipped")).toBe(toneFor(DEFAULT_MODEL));
   });
 
-  it("defaults to a chat tone, the kind measured making tool calls on a live tenant", () => {
-    expect(DEFAULT_MODEL).toBe("quick");
-    expect(resolveModel(DEFAULT_MODEL).reasoning).toBe(false);
+  it("defaults to GPT-6.1 Sol, the best-measured tone for agent-less tool turns", () => {
+    // This fork's Studio agent is opt-in, so tool turns normally run agent-less; see
+    // the comment on DEFAULT_MODEL for the measurements behind this choice.
+    expect(DEFAULT_MODEL).toBe("gpt-6.1-sol");
+    expect(toneFor(DEFAULT_MODEL)).toBe("Gpt_61_Sol_Reasoning");
+    expect(toneFor("gpt-6-sol")).toBe("Gpt_6_Sol_Reasoning");
+    // The upstream default stays selectable.
+    expect(toneFor("quick")).toBe("Gpt_5_5_Chat");
+  });
+
+  it("puts the Sol tones on the relay framing with the measured sandbox note", () => {
+    for (const tone of ["Gpt_61_Sol_Reasoning", "Gpt_6_Sol_Reasoning"]) {
+      const route = toolRouteFor(tone);
+      expect(route.framing).toBe("relay");
+      expect(route.sandbox).toContain("bash_tool");
+    }
+    expect(toolRouteFor("Gpt_5_5_Chat")).toEqual({ framing: "default", agent: true });
   });
 
   it("offers the GPT-5.6 chat tone", () => {

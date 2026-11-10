@@ -296,6 +296,31 @@ describe("chat completions", () => {
   });
 });
 
+describe("a Copilot Chat account without Copilot Studio (this fork's default path)", () => {
+  const chatArg = (server: StubServer) => server.last().frames.find((f) => f.type === 4).arguments[0];
+
+  it("sends a default-model tool turn agent-less, on the relay framing, with no Bing and no Studio calls", async () => {
+    stub = await startStubCopilot({ respond: () => [botMessage("```bash\nls\n```"), completion()] });
+    const resolveAgent = vi.fn(async () => "T_should_not_be_used");
+    // What runtime.ts starts when studioAgent is off: no resolveAgent at all.
+    const { url } = await start({ resolveAgent: undefined });
+    const body: any = await (
+      await post(url, { messages: [{ role: "user", content: "list the files" }], tools: [bashTool] })
+    ).json();
+
+    const arg = chatArg(stub);
+    expect(arg.tone).toBe("Gpt_61_Sol_Reasoning");
+    expect(arg.threadLevelGptId).toBeUndefined();
+    expect(arg.gpts).toBeUndefined();
+    expect(arg.plugins).toBeUndefined();
+    expect(arg.message.text).toMatch(/guide me through this from my terminal/);
+    expect(arg.message.text).toContain("bash_tool, create_file, str_replace, view");
+    expect(resolveAgent).not.toHaveBeenCalled();
+    // The model's fenced reply still comes back to opencode as a real tool call.
+    expect(body.choices[0].message.tool_calls?.[0]?.function?.name).toBe("bash");
+  });
+});
+
 describe("Bing web search on coding turns", () => {
   const chatArg = (server: StubServer) => server.last().frames.find((f) => f.type === 4).arguments[0];
 
@@ -636,6 +661,7 @@ describe("streaming", () => {
 });
 
 describe("a give-up on a tool turn", () => {
+  // Pinned to a default-framing tone: these test the give-up nudge, not the default model.
   const giveUp = "I can't run commands because no shell execution tool is available in this session.";
   const chats = () => stub!.connections.map((c) => c.frames.find((f) => f.type === 4 && f.target === "chat"));
 
@@ -645,7 +671,7 @@ describe("a give-up on a tool turn", () => {
       respond: () => [streamItem(turn++ === 0 ? giveUp : "```bash\nls\n```"), completion()],
     });
     const { url } = await start();
-    const body: any = await (await post(url, { messages: [{ role: "user", content: "list files" }], tools: [bashTool] })).json();
+    const body: any = await (await post(url, { model: "quick", messages: [{ role: "user", content: "list files" }], tools: [bashTool] })).json();
     expect(body.choices[0].finish_reason).toBe("tool_calls");
     const [first, second] = chats();
     expect(second.arguments[0].conversationId).toBe(first.arguments[0].conversationId);
@@ -657,6 +683,7 @@ describe("a give-up on a tool turn", () => {
     stub = await startStubCopilot({ respond: () => [streamItem(turn++ === 0 ? giveUp : "```bash\nls\n```"), completion()] });
     const { url } = await start();
     await post(url, {
+      model: "quick",
       messages: [
         { role: "user", content: "list files" },
         { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{\"command\":\"pwd\"}" } }] },
@@ -670,7 +697,7 @@ describe("a give-up on a tool turn", () => {
   it("gives up after one nudge rather than looping", async () => {
     stub = await startStubCopilot({ respond: () => [streamItem(giveUp), completion()] });
     const { url } = await start();
-    const body: any = await (await post(url, { messages: [{ role: "user", content: "list files" }], tools: [bashTool] })).json();
+    const body: any = await (await post(url, { model: "quick", messages: [{ role: "user", content: "list files" }], tools: [bashTool] })).json();
     expect(body.choices[0].message.content).toBe(giveUp);
     expect(stub.connections).toHaveLength(2);
   });
@@ -678,14 +705,14 @@ describe("a give-up on a tool turn", () => {
   it("leaves a real answer alone", async () => {
     stub = await startStubCopilot({ respond: () => [streamItem("There are three files."), completion()] });
     const { url } = await start();
-    await post(url, { messages: [{ role: "user", content: "how many files?" }], tools: [bashTool] });
+    await post(url, { model: "quick", messages: [{ role: "user", content: "how many files?" }], tools: [bashTool] });
     expect(stub.connections).toHaveLength(1);
   });
 
   it("never nudges a turn without tools", async () => {
     stub = await startStubCopilot({ respond: () => [streamItem(giveUp), completion()] });
     const { url } = await start();
-    await post(url, { messages: [{ role: "user", content: "hi" }] });
+    await post(url, { model: "quick", messages: [{ role: "user", content: "hi" }] });
     expect(stub.connections).toHaveLength(1);
   });
 });

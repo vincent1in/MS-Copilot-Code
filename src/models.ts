@@ -55,9 +55,23 @@ export const LOCAL_TITLE_MODEL = "local-title";
  * to have no tools 3/3 — matching `m365-copilot-api.md` quirk #13, and contradicting
  * the 100% that project's README reports for it.
  */
-export const DEFAULT_MODEL = "quick";
+//
+// This fork defaults to `gpt-6.1-sol` instead. Here the Copilot Studio agent is
+// opt-in, so tool turns normally run agent-less, and for agent-less turns the
+// evidence points elsewhere: the reference project (cramt/m365-copilot-proxy, README
+// and hypotheses §23/§27–29) measured GPT-6 Sol and GPT-6.1 Sol under the `relay`
+// framing at 60/60 and 39/40 on its bench and 30/30 driving a real agent, on accounts
+// with no paid Copilot seat — both tones serve on the included Copilot Chat scenario
+// on every work account. GPT-5.x reasoning tones made no agent-less tool calls there
+// (0/4). Not yet re-measured through this fork on a live tenant; `m365/quick` stays
+// available.
+export const DEFAULT_MODEL = "gpt-6.1-sol";
 
 export const MODELS: readonly ModelInfo[] = [
+  // Work on every account (the included Copilot Chat scenario), and are the
+  // best-measured choice agent-less — see DEFAULT_MODEL. Reasoning tones: 10-30s a turn.
+  m("gpt-6.1-sol", "GPT-6.1 Sol (recommended without Copilot Studio)", "Gpt_61_Sol_Reasoning", true),
+  m("gpt-6-sol", "GPT-6 Sol", "Gpt_6_Sol_Reasoning", true),
   // Upstream's mailbox-grounded `work` / `work-think` models (Copilot searching your
   // mail, Teams and files server-side) are removed in this fork: not needed for
   // coding, and their scenario sent an `EnableStarterLicenseCheckBypass` flag.
@@ -144,6 +158,9 @@ export function listModelIds(): string[] {
   return MODELS.map((model) => model.id);
 }
 
+/** The sandbox tool names the reference project's relay note lists (fenced.ts there). */
+const SOL_SANDBOX_TOOLS = "bash_tool, create_file, str_replace, view, …";
+
 /** How a tool turn is put to M365 for a given tone. */
 export interface ToolRoute {
   /** `relay`: the user asks to be guided through their own terminal, one command at a time. */
@@ -168,6 +185,13 @@ export interface ToolRoute {
  *   licensed account, so not adopted.
  */
 export function toolRouteFor(tone: string | null): ToolRoute {
+  // GPT-6 Sol / 6.1 Sol: relay, naming the built-in sandbox tools exactly as the
+  // reference project's measured relay note does. Without the agent these tones have
+  // a remote sandbox of their own and will work there instead of in your workspace
+  // unless told it is the wrong machine.
+  if (tone && /^Gpt_\d+_Sol_Reasoning$/.test(tone)) {
+    return { framing: "relay", agent: true, sandbox: SOL_SANDBOX_TOOLS };
+  }
   if (tone?.startsWith("Gpt_") && tone.endsWith("_Reasoning")) return { framing: "relay", agent: true };
   return { framing: "default", agent: true };
 }
