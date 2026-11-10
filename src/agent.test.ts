@@ -140,6 +140,15 @@ describe("environment host discovery", () => {
   });
 });
 
+describe("Copilot Studio requests", () => {
+  it("all refuse redirects", async () => {
+    const fetch = fakeFetch(studioRoutes([], { botId: "B7", titleId: "T_7" }));
+    await getOrCreateAgent(deps({ fetch }));
+    expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(4);
+    for (const [, init] of fetch.mock.calls) expect(init?.redirect).toBe("error");
+  });
+});
+
 describe("environment id from BAP", () => {
   it("refuses an environment name that is not a tenant GUID, before calling Copilot Studio", async () => {
     // A crafted name like "Default-evil.example#" would otherwise be spliced into the

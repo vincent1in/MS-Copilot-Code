@@ -81,6 +81,8 @@ export async function uploadImage(dataUrl: string, options: UploadOptions): Prom
   assertEgress("chat", target);
   const response = await fetch(target, {
     method: "POST",
+    // Never follow a redirect: the next hop would get the image (and the body) unchecked.
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${options.token}`,
       "Content-Type": "application/x-www-form-urlencoded",

@@ -19,6 +19,9 @@
  */
 
 import type { INetworkModule, NetworkRequestOptions, NetworkResponse } from "@azure/msal-node";
+import { createLogger } from "./log.js";
+
+const log = createLogger("egress");
 
 export type EgressPurpose = "auth" | "chat" | "studio";
 
@@ -89,7 +92,8 @@ export function assertEgress(purpose: EgressPurpose, target: string | URL): URL 
 }
 
 /**
- * MSAL's network client, with every request checked against the `auth` allowlist.
+ * MSAL's network client, with every request checked against the `auth` allowlist and
+ * redirects refused (each hop would otherwise go unchecked).
  *
  * Mirrors MSAL's own fetch-based `HttpClient` (which msal-node does not export, so it
  * cannot be wrapped): same methods, same `{ headers, body, status }` shape, JSON body,
@@ -103,7 +107,14 @@ export function createGuardedNetworkClient(doFetch: typeof globalThis.fetch = (i
     options?: NetworkRequestOptions,
     timeout?: number,
   ): Promise<NetworkResponse<T>> {
-    const url = assertEgress("auth", rawUrl);
+    let url: URL;
+    try {
+      url = assertEgress("auth", rawUrl);
+    } catch (error) {
+      // MSAL re-wraps network errors as a generic `network_error`; keep the reason.
+      log.warn(String(error));
+      throw error;
+    }
     const controller = new AbortController();
     const timer = timeout ? setTimeout(() => controller.abort(), timeout) : undefined;
     const headers = new Headers();
@@ -113,6 +124,9 @@ export function createGuardedNetworkClient(doFetch: typeof globalThis.fetch = (i
         method,
         headers,
         signal: controller.signal,
+        // A redirect would send this request (a refresh token, on POST) to a host
+        // the allowlist never saw. Token endpoints do not redirect; refuse.
+        redirect: "error",
         ...(method === "POST" ? { body: options?.body ?? "" } : {}),
       });
       const responseHeaders: Record<string, string> = {};

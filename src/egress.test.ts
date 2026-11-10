@@ -1,4 +1,6 @@
+import { createServer, type Server } from "node:http";
 import { describe, expect, it, vi } from "vitest";
+import { uploadImage } from "./image.js";
 import { assertEgress, createGuardedNetworkClient, EgressDeniedError, isPowerPlatformEnvironmentHost } from "./egress.js";
 
 const PP_HOST = "defaultabcdef0123456789abcdef01234567.89.environment.api.powerplatform.com";
@@ -82,5 +84,54 @@ describe("createGuardedNetworkClient (MSAL)", () => {
     const [, init] = doFetch.mock.calls[0]!;
     expect(init?.method).toBe("POST");
     expect(init?.body).toBe("grant_type=refresh_token");
+  });
+});
+
+describe("redirects are never followed", () => {
+  // A 307 would re-send the request body (a refresh token, an image) to a host the
+  // allowlist never saw. A real server on loopback answers with one; the target of the
+  // redirect must receive nothing.
+  async function listen(handler: Parameters<typeof createServer>[1]): Promise<{ server: Server; origin: string }> {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return { server, origin: `http://127.0.0.1:${(server.address() as { port: number }).port}` };
+  }
+
+  async function withRedirect(run: (redirector: string, hits: () => number) => Promise<void>): Promise<void> {
+    let targetHits = 0;
+    const target = await listen((_request, response) => {
+      targetHits += 1;
+      response.end("{}");
+    });
+    const redirector = await listen((_request, response) => {
+      response.writeHead(307, { Location: `${target.origin}/stolen` });
+      response.end();
+    });
+    try {
+      await run(redirector.origin, () => targetHits);
+    } finally {
+      redirector.server.close();
+      target.server.close();
+    }
+  }
+
+  it("by MSAL's guarded network client", async () => {
+    await withRedirect(async (origin, hits) => {
+      const client = createGuardedNetworkClient();
+      await expect(
+        client.sendPostRequestAsync(`${origin}/common/oauth2/v2.0/token`, { body: "grant_type=refresh_token&refresh_token=SECRET" }),
+      ).rejects.toThrow();
+      await expect(client.sendGetRequestAsync(`${origin}/common/discovery`)).rejects.toThrow();
+      expect(hits()).toBe(0);
+    });
+  });
+
+  it("by the image upload", async () => {
+    await withRedirect(async (origin, hits) => {
+      await expect(
+        uploadImage("data:image/png;base64,iVBORw0KGgo=", { token: "t", conversationId: "c", origin }),
+      ).rejects.toThrow();
+      expect(hits()).toBe(0);
+    });
   });
 });

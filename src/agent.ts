@@ -185,7 +185,7 @@ async function discoverEnvironmentId(
 ): Promise<string> {
   const token = await getTokenForScope([BAP_SCOPE]);
   assertEgress("studio", BAP_ENVIRONMENT_URL);
-  const response = await doFetch(BAP_ENVIRONMENT_URL, { headers: { Authorization: `Bearer ${token}` } });
+  const response = await doFetch(BAP_ENVIRONMENT_URL, { headers: { Authorization: `Bearer ${token}` }, redirect: "error" });
   if (!response.ok) throw new AgentHttpError(await describeFailure("environment discovery", response), response.status);
 
   const body: any = await response.json();
@@ -216,7 +216,7 @@ async function findBot(
 ): Promise<string | undefined> {
   const url = `https://${host}/copilotstudio/minimalBots/api?api-version=${COPILOT_STUDIO_API_VERSION}`;
   assertEgress("studio", url);
-  const response = await doFetch(url, { headers: studioHeaders(token) });
+  const response = await doFetch(url, { headers: studioHeaders(token), redirect: "error" });
   if (!response.ok) throw new AgentHttpError(await describeFailure("listing agents", response), response.status);
 
   const bots: any = await response.json();
@@ -303,6 +303,7 @@ async function createBot(
   const response = await doFetch(url, {
     method: "POST",
     headers: studioHeaders(token),
+    redirect: "error",
     body: JSON.stringify(createBotBody(name)),
   });
   if (!response.ok) throw new AgentHttpError(await describeFailure("creating the agent", response), response.status);
@@ -321,7 +322,7 @@ async function publishBot(
 ): Promise<string> {
   const url = `https://${host}/copilotstudio/minimalBots/api/${encodeURIComponent(botId)}/publish?api-version=${COPILOT_STUDIO_API_VERSION}`;
   assertEgress("studio", url);
-  const response = await doFetch(url, { method: "POST", headers: studioHeaders(token) });
+  const response = await doFetch(url, { method: "POST", headers: studioHeaders(token), redirect: "error" });
   if (!response.ok) throw new AgentHttpError(await describeFailure("publishing the agent", response), response.status);
 
   const body: any = await response.json();
