@@ -40,9 +40,10 @@ describe.runIf(process.platform !== "win32")("the debug log", () => {
 });
 
 describe("redaction", () => {
+  const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJvaWQiOiJhYmNkZWZnaCJ9.c2lnbmF0dXJlLXZhbHVl";
+
   it("strips tokens from anything that is logged", async () => {
     const { redact } = await import("./log.js");
-    const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJvaWQiOiJhYmNkZWZnaCJ9.c2lnbmF0dXJlLXZhbHVl";
     const line = redact(
       `wss://substrate.office.com/m365Copilot/Chathub/a@b?access_token=${jwt}&ConversationId=c ` +
         `Authorization: Bearer abc.def-ghi {"refresh_token":"0.AAAA-secret","note":"kept"} raw ${jwt}`,
@@ -52,6 +53,40 @@ describe("redaction", () => {
     expect(line).not.toContain("0.AAAA-secret");
     expect(line).toContain("access_token=[REDACTED]&ConversationId=c");
     expect(line).toContain('"note":"kept"');
+  });
+
+  it.each([
+    ["a form body", "grant_type=refresh_token&refresh_token=0.AAAA-opaque&client_id=x", "0.AAAA-opaque"],
+    ["a form body that starts with it", "refresh_token=0.AAAA-opaque&x=1", "0.AAAA-opaque"],
+    ["the sign-in redirect's code", "https://login.microsoftonline.com/common/oauth2/nativeclient?code=0.AWA-code&state=s", "0.AWA-code"],
+    ["JSON-escaped fields inside a logged reply", String.raw`{"reply":"{\"secret\":\"0.AAAA-escaped\"}"}`, "0.AAAA-escaped"],
+    ["camelCase token fields", `{"accessToken":"opaque-value","refreshToken":"0.BBBB"}`, "opaque-value"],
+    ["an encrypted (JWE) token", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..aXYtdmFsdWUtaGVyZQ.Y2lwaGVydGV4dC1oZXJl.dGFnLXZhbHVl", "Y2lwaGVydGV4dC1oZXJl"],
+  ])("covers %s", async (_what, input, secret) => {
+    const { redact } = await import("./log.js");
+    expect(redact(input)).not.toContain(secret);
+  });
+
+  it("leaves ordinary text alone", async () => {
+    const { redact } = await import("./log.js");
+    const prose = "exit code=1, the code: ok, status 200, eyJ alone";
+    expect(redact(prose)).toBe(prose);
+  });
+
+  it("runs in linear time on adversarial input (it runs on opencode's event loop)", async () => {
+    const { redact } = await import("./log.js");
+    const inputs = [
+      "eyJ".repeat(100_000),
+      `${"eyJabcdefghij.".repeat(20_000)}`,
+      String.raw`"secret\\\"`.repeat(20_000),
+      "Bearer ".repeat(40_000),
+      "?code=&".repeat(40_000),
+      "\n".repeat(200_000),
+    ];
+    const started = performance.now();
+    for (const input of inputs) redact(input);
+    // The unanchored pattern this replaced took ~31 s on 200 KB of "eyJ".
+    expect(performance.now() - started).toBeLessThan(1500);
   });
 
   it.runIf(process.platform !== "win32")("applies to the debug log file, even under M365_TRACE", async () => {
