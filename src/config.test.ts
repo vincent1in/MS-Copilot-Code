@@ -14,6 +14,7 @@ import {
   mergeOpencodeConfig,
   resolveOptions,
   selectLeanTools,
+  studioAgentEnabled,
 } from "./config.js";
 
 const names = (tools: readonly ToolDef[]) => tools.map((tool) => tool.function.name);
@@ -148,6 +149,25 @@ describe("plugin options", () => {
     expect(resolveOptions({ apiKey: "from-serve" }).apiKey).toBe("from-serve");
     expect(resolveOptions({ apiKey: 42 as unknown as string }).apiKey).toBeUndefined();
     expect(resolveOptions({}).apiKey).toBeUndefined();
+  });
+
+  it("keeps the Copilot Studio agent off unless explicitly asked for", () => {
+    // Provisioning creates and publishes a bot in the tenant; this fork never does that
+    // by default.
+    const saved = process.env.M365_STUDIO_AGENT;
+    delete process.env.M365_STUDIO_AGENT;
+    try {
+      expect(resolveOptions({}).studioAgent).toBe(false);
+      expect(studioAgentEnabled(resolveOptions({}))).toBe(false);
+      expect(studioAgentEnabled(resolveOptions({ studioAgent: "yes" as unknown as boolean }))).toBe(false);
+      expect(studioAgentEnabled(resolveOptions({ studioAgent: true }))).toBe(true);
+      process.env.M365_STUDIO_AGENT = "1";
+      expect(studioAgentEnabled(resolveOptions({}))).toBe(true);
+      expect(studioAgentEnabled()).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.M365_STUDIO_AGENT;
+      else process.env.M365_STUDIO_AGENT = saved;
+    }
   });
 
   it("ignores option values of the wrong type instead of crashing the plugin", () => {

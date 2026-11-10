@@ -133,6 +133,17 @@ export interface PluginOptions {
    * the preservation logic is ever wrong.
    */
   leanSystemPrompt: boolean;
+  /**
+   * Provision a Copilot Studio declarative agent and attach it to tool turns.
+   *
+   * OFF by default in this fork. When on, the first tool turn creates and publishes a
+   * bot named `m365-tool-agent-<hash>` in the tenant's default Power Platform
+   * environment (never deleted), which needs Copilot Studio access and Power Platform
+   * / BAP tokens. Off, nothing is created in the tenant and those scopes are never
+   * requested; tool turns run agent-less on the per-request fenced prompt.
+   * `M365_STUDIO_AGENT=1` turns it on for the CLI and the plugin alike.
+   */
+  studioAgent: boolean;
   /** Use an already-running proxy instead of starting one in-process. */
   baseUrl?: string;
   /**
@@ -141,6 +152,14 @@ export interface PluginOptions {
    * secret is generated and handed over automatically.
    */
   apiKey?: string;
+}
+
+/**
+ * Is the opt-in Copilot Studio agent enabled? The plugin option, or
+ * `M365_STUDIO_AGENT=1` (the only switch for `opencode-m365 serve`).
+ */
+export function studioAgentEnabled(options?: Pick<PluginOptions, "studioAgent">): boolean {
+  return options?.studioAgent === true || process.env.M365_STUDIO_AGENT === "1";
 }
 
 /** Where the proxy is, and the bearer secret it requires. */
@@ -164,6 +183,7 @@ export function resolveOptions(raw: Partial<PluginOptions> | undefined): PluginO
     setDefaultModel: bool(options.setDefaultModel, true),
     setSmallModel: bool(options.setSmallModel, true),
     leanSystemPrompt: bool(options.leanSystemPrompt, false),
+    studioAgent: bool(options.studioAgent, false),
     baseUrl: typeof options.baseUrl === "string" ? options.baseUrl : undefined,
     apiKey: typeof options.apiKey === "string" && options.apiKey !== "" ? options.apiKey : undefined,
   };
@@ -294,6 +314,7 @@ const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<keyof PluginOptions>([
   "setDefaultModel",
   "setSmallModel",
   "leanSystemPrompt",
+  "studioAgent",
   "baseUrl",
   "apiKey",
 ]);

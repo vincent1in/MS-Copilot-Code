@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTokenClient } from "./auth.js";
 import { getOrCreateAgent } from "./agent.js";
-import { PROVIDER_ID, mergeOpencodeConfig, type PluginPathInfo } from "./config.js";
+import { PROVIDER_ID, mergeOpencodeConfig, studioAgentEnabled, type PluginPathInfo } from "./config.js";
 import { checkTones, distinctTones } from "./live-check.js";
 import { DEFAULT_MODEL, LOCAL_TITLE_MODEL, MODELS } from "./models.js";
 import { CopilotSession } from "./session.js";
@@ -155,15 +155,20 @@ async function doServe(args: string[]): Promise<void> {
   // otherwise every launch mints a fresh one.
   const fixedKey = process.env.M365_PROXY_KEY || undefined;
 
+  const useStudioAgent = studioAgentEnabled();
   const proxy = await startServer({
     getToken: () => tokens.getToken(),
-    resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }),
+    // Opt-in only (M365_STUDIO_AGENT=1): provisioning creates a bot in the tenant.
+    ...(useStudioAgent
+      ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
+      : {}),
     port,
     ...(fixedKey ? { apiKey: fixedKey } : {}),
   });
 
   console.log(`M365 Copilot proxy listening on ${proxy.url}`);
   console.log(`  models:      ${proxy.url}/v1/models`);
+  console.log(`  studio agent: ${useStudioAgent ? "enabled (M365_STUDIO_AGENT=1)" : "disabled — nothing is created in your tenant"}`);
   console.log(`  completions: ${proxy.url}/v1/chat/completions`);
   console.log("\nLoopback-only. Every request must send `Authorization: Bearer <key>`;");
   console.log("browser origins and CORS are refused.");
@@ -205,20 +210,15 @@ async function doDoctor(args: string[]): Promise<void> {
     check("chat token", false, (error as Error).message);
   }
 
-  console.log("\nDeclarative agent");
-  if (!signedIn) {
-    console.log("  skip  needs a signed-in account");
+  // Read-only: doctor reports on the agent but never provisions one. Creating a bot
+  // in the tenant is not something a health check should do.
+  console.log("\nCopilot Studio agent (opt-in)");
+  if (!studioAgentEnabled()) {
+    console.log('  ..    disabled — nothing is created in your tenant. Enable with { "studioAgent": true } or M365_STUDIO_AGENT=1');
   } else {
-    try {
-      const agentId = await getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) });
-      check("agent", true, agentId);
-    } catch (error) {
-      // Not fatal: without it tool calling is less reliable, but chat still works.
-      console.log(`  warn  agent unavailable — ${(error as Error).message}`);
-      console.log("        Tool calling will be markedly less reliable without it.");
-    }
+    console.log("  ..    enabled — provisioned lazily on the first tool turn");
   }
-  console.log(`  ..    cache — ${existsSync(AGENT_FILE) ? AGENT_FILE : "not yet provisioned"}`);
+  console.log(`  ..    cache — ${existsSync(AGENT_FILE) ? AGENT_FILE : "none"}`);
 
   console.log("\nProxy");
   try {
