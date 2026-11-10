@@ -6,6 +6,7 @@
  * so the interesting decisions are testable without opencode, a network, or a tenant.
  */
 
+import { isLoopbackHostname } from "./egress.js";
 import { MODELS, isLocalModel } from "./models.js";
 import { findShellTool, type ToolDef } from "./fenced.js";
 
@@ -161,6 +162,20 @@ export interface PluginOptions {
   apiKey?: string;
 }
 
+/** `raw` if it is an http(s) URL on a loopback host with no credentials, else undefined. */
+export function loopbackBaseUrl(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || raw === "") return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  if (url.username || url.password) return undefined;
+  return isLoopbackHostname(url.hostname) ? raw : undefined;
+}
+
 /**
  * Is the opt-in Copilot Studio agent enabled? The plugin option, or
  * `M365_STUDIO_AGENT=1` (the only switch for `opencode-m365 serve`).
@@ -197,7 +212,9 @@ export function resolveOptions(raw: Partial<PluginOptions> | undefined): PluginO
     leanSystemPrompt: bool(options.leanSystemPrompt, false),
     studioAgent: bool(options.studioAgent, false),
     webSearch: bool(options.webSearch, false),
-    baseUrl: typeof options.baseUrl === "string" ? options.baseUrl : undefined,
+    // opencode sends every prompt and the proxy key to `baseUrl`, so only a proxy on
+    // this machine is accepted; anything else falls back to the in-process proxy.
+    baseUrl: loopbackBaseUrl(options.baseUrl),
     apiKey: typeof options.apiKey === "string" && options.apiKey !== "" ? options.apiKey : undefined,
   };
 }

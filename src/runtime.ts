@@ -63,6 +63,9 @@ export interface M365Runtime {
  */
 export async function startRuntime(rawOptions?: Record<string, unknown>): Promise<M365Runtime> {
   const options = resolveOptions(rawOptions as Partial<PluginOptions> | undefined);
+  if (typeof rawOptions?.baseUrl === "string" && rawOptions.baseUrl !== "" && !options.baseUrl) {
+    log.warn("ignoring baseUrl: only a proxy on this machine (loopback http/https) is accepted; using the in-process proxy");
+  }
   const sharedKey = process.env.M365_PROXY_KEY || undefined;
 
   if (options.baseUrl) {

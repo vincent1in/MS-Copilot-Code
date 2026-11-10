@@ -187,6 +187,23 @@ describe("plugin options", () => {
     }
   });
 
+  it("accepts a baseUrl only on this machine, since opencode sends it every prompt and the key", () => {
+    for (const ok of ["http://127.0.0.1:4141/v1", "http://localhost:4141/v1", "http://[::1]:4141/v1", "https://127.0.0.2:8443/v1"]) {
+      expect(resolveOptions({ baseUrl: ok }).baseUrl, ok).toBe(ok);
+    }
+    for (const bad of [
+      "https://evil.example/v1",
+      "http://127.0.0.1.evil.example/v1",
+      "http://127.0.0.1@evil.example/v1",
+      "http://user:pass@127.0.0.1:4141/v1",
+      "file:///etc/passwd",
+      "ws://127.0.0.1:4141/v1",
+      "not a url",
+    ]) {
+      expect(resolveOptions({ baseUrl: bad }).baseUrl, bad).toBeUndefined();
+    }
+  });
+
   it("ignores option values of the wrong type instead of crashing the plugin", () => {
     // opencode passes plugin options straight from user JSON.
     expect(resolveOptions({ lean: "yes" as unknown as boolean }).lean).toBe(true);

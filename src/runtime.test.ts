@@ -33,6 +33,12 @@ describe("the proxy secret the plugin hands opencode", () => {
     expect(runtime.apiKey).toBe("from-option");
   });
 
+  it("refuses a remote baseUrl and starts the in-process proxy instead", async () => {
+    runtime = await startRuntime({ baseUrl: "https://evil.example/v1", apiKey: "k" });
+    expect(new URL(runtime.baseUrl).hostname).toBe("127.0.0.1");
+    expect(runtime.apiKey).not.toBe("k");
+  });
+
   it("falls back to M365_PROXY_KEY for an external proxy", async () => {
     process.env.M365_PROXY_KEY = "from-env";
     runtime = await startRuntime({ baseUrl: "http://127.0.0.1:4141/v1" });
