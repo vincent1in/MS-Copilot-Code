@@ -410,12 +410,9 @@ async function runTurn(
     ...(context.deps.endpoint ? { endpoint: context.deps.endpoint } : {}),
   });
 
-  // A grounded (mailbox) model is read-only Q&A over the user's own data: it
-  // carries no opencode tools, so the fenced tool prompt is never attached, no
-  // declarative agent is wired, and no tool-call parsing runs on its answer. That
-  // is what keeps "ask your work" from being handed a coding toolset it can't act
-  // on. Every tools-derived decision below reads `effectiveTools`.
-  const effectiveTools = model.grounded ? [] : tools;
+  // Every tools-derived decision below reads `effectiveTools`. (Upstream emptied it
+  // for mailbox-grounded models, which this fork removes.)
+  const effectiveTools = tools;
 
   // Only the messages this turn carries: M365 already has any earlier image.
   const images = collectImages(body.messages, conversation.sentMessageCount);
@@ -441,10 +438,8 @@ async function runTurn(
   const streaming = body.stream === true;
   const streamId = `chatcmpl-${randomUUID()}`;
   // Only a tool-less turn can stream: a fenced tool call is not parseable until the
-  // fence closes, so a tool turn has to be buffered and emitted at the end. A
-  // grounded turn is also buffered, so its answer is emitted once with the citation
-  // tokens already stripped rather than streaming them raw.
-  const canStreamText = streaming && effectiveTools.length === 0 && !model.grounded;
+  // fence closes, so a tool turn has to be buffered and emitted at the end.
+  const canStreamText = streaming && effectiveTools.length === 0;
 
   if (streaming) startSse(response);
 
@@ -463,7 +458,6 @@ async function runTurn(
   const turnOptions = {
     ...(model.tone ? { tone: model.tone } : {}),
     agentId: agent,
-    ...(model.grounded ? { grounded: true } : {}),
     signal: abort.signal,
   };
   const recordTurn = (result: TurnResult, extra: Partial<TurnLogEntry> = {}) =>

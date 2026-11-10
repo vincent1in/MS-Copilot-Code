@@ -21,11 +21,6 @@ export interface ModelInfo {
   tone: string | null;
   /** Whether this is a reasoning tone (10-30s per turn). */
   reasoning: boolean;
-  /**
-   * Ground turns on the signed-in mailbox (Outlook side-pane scenario +
-   * `WorkSearch`). Off for coding/web models; on for the `work*` models.
-   */
-  grounded?: boolean;
   limit: { context: number; output: number };
 }
 
@@ -63,11 +58,9 @@ export const LOCAL_TITLE_MODEL = "local-title";
 export const DEFAULT_MODEL = "quick";
 
 export const MODELS: readonly ModelInfo[] = [
-  // Mailbox-grounded models: select these in opencode (as `m365/work` /
-  // `m365/work-think`) to ask about your own mail, calendar and files — Copilot
-  // searches them server-side. The other models stay coding/web-only.
-  m("work", "Ask your mail, Teams & files", "magic", false, true),
-  m("work-think", "Ask your mail, Teams & files (Think Deeper)", "Gpt_5_5_Reasoning", true, true),
+  // Upstream's mailbox-grounded `work` / `work-think` models (Copilot searching your
+  // mail, Teams and files server-side) are removed in this fork: not needed for
+  // coding, and their scenario sent an `EnableStarterLicenseCheckBypass` flag.
   m("gpt-5.6-think-deeper", "GPT-5.6 (Think Deeper)", "Gpt_5_6_Reasoning", true),
   m("gpt-5.5-think-deeper", "GPT-5.5 (Think Deeper)", "Gpt_5_5_Reasoning", true),
   m("gpt-5.5", "GPT-5.5", "Gpt_5_5_Chat", false),
@@ -96,13 +89,12 @@ export const MODELS: readonly ModelInfo[] = [
   m(LOCAL_TITLE_MODEL, "Local titler (no M365 call)", null, false),
 ];
 
-function m(id: string, name: string, tone: string | null, reasoning: boolean, grounded = false): ModelInfo {
+function m(id: string, name: string, tone: string | null, reasoning: boolean): ModelInfo {
   return {
     id,
-    name: pickerName(name, tone, grounded),
+    name: pickerName(name, tone),
     tone,
     reasoning,
-    grounded,
     limit: { context: CONTEXT_TOKENS, output: OUTPUT_TOKENS },
   };
 }
@@ -112,9 +104,9 @@ function m(id: string, name: string, tone: string | null, reasoning: boolean, gr
  * the name is the only thing that separates reading your account from writing code.
  * The local titler is neither.
  */
-function pickerName(name: string, tone: string | null, grounded: boolean): string {
+function pickerName(name: string, tone: string | null): string {
   if (tone === null) return name;
-  return `${grounded ? "Work" : "Code"} · ${name}`;
+  return `Code · ${name}`;
 }
 
 const BY_ID = new Map(MODELS.map((model) => [model.id, model]));

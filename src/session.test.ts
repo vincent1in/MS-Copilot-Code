@@ -9,7 +9,7 @@ import {
   throttling,
   type StubServer,
 } from "../test/stub-copilot.js";
-import { CopilotSession, DisengagedError, M365ThrottledError, M365UnavailableError, decodeJwt, cleanAnswer } from "./session.js";
+import { CopilotSession, DisengagedError, M365ThrottledError, M365UnavailableError, decodeJwt } from "./session.js";
 
 /** A token carrying just the claims we read: object id and tenant id. */
 function fakeToken(oid = "aaaa-oid", tid = "bbbb-tid"): string {
@@ -175,68 +175,29 @@ describe("agent attachment", () => {
   });
 });
 
-describe("mailbox grounding", () => {
-  it("switches the URL to the Outlook side-pane scenario when grounded", async () => {
+describe("no mailbox grounding (removed in this fork)", () => {
+  it("always uses the full-screen Copilot Chat scenario, never the Outlook side-pane one", async () => {
     stub = await startStubCopilot();
-    await sessionFor(stub).run("what is in my inbox?", { grounded: true });
+    await sessionFor(stub).run("what is in my inbox?");
     const url = new URL(stub.last().url, "http://x");
-    expect(url.searchParams.get("scenario")).toBe("OutlookSidepaneWorkCopilot");
-    expect(url.searchParams.get("agentHost")).toBe("Bizchat.Sidepane");
-    expect(url.searchParams.get("agent")).toBe("work");
+    expect(url.searchParams.get("scenario")).toBe("OfficeWebIncludedCopilot");
+    expect(url.searchParams.get("agentHost")).toBe("Bizchat.FullScreen");
+    expect(url.searchParams.get("agent")).toBeNull();
   });
 
-  it("keeps the full-screen scenario for an ordinary (ungrounded) turn", async () => {
+  it("never sends the license-check-bypass or side-pane feature flags", async () => {
     stub = await startStubCopilot();
     await sessionFor(stub).run("hi");
-    expect(new URL(stub.last().url, "http://x").searchParams.get("scenario")).toBe("OfficeWebIncludedCopilot");
-  });
-
-  it("attaches the built-in WorkSearch agent that grounds on the mailbox", async () => {
-    stub = await startStubCopilot();
-    await sessionFor(stub).run("hi", { grounded: true });
+    const variants = new URL(stub.last().url, "http://x").searchParams.get("variants") ?? "";
+    expect(variants).not.toMatch(/LicenseCheckBypass|OutlookSidepane|isExternalEmailEnabled/);
     const arg = chatFrame(stub).arguments[0];
-    expect(arg.gpts[0].id).toBe("bizchat-as-gpt-scenario");
-    expect(arg.gpts[0].clientOverrides.capabilities).toEqual([{ name: "WebSearch" }, { name: "WorkSearch" }]);
-    expect(arg.source).toBe("owahub");
+    expect(arg.source).toBe("officeweb");
+    expect(JSON.stringify(arg)).not.toMatch(/WorkSearch|bizchat-as-gpt-scenario|owahub/i);
   });
 
-  it("lets grounding win over a declarative agentId", async () => {
-    stub = await startStubCopilot();
-    await sessionFor(stub).run("hi", { grounded: true, agentId: "T_123.abc.gpt.default" });
-    expect(chatFrame(stub).arguments[0].gpts[0].id).toBe("bizchat-as-gpt-scenario");
-    expect(chatFrame(stub).arguments[0].threadLevelGptId).toBeUndefined();
-  });
-});
-
-describe("cleanAnswer", () => {
-  it("strips citation control tokens, keeping the prose", () => {
-    const raw = "You have 170 unread. citeturn1search23turn1search7 Done.【2-9c5ade】";
-    expect(cleanAnswer(raw)).toBe("You have 170 unread. Done.");
-  });
-
-  it("leaves ordinary code/prose untouched", () => {
-    expect(cleanAnswer("const x = 1; // fine")).toBe("const x = 1; // fine");
-  });
-
-  it("preserves code indentation while stripping tokens (grounded answers can hold code)", () => {
-    const raw = "Here is the snippet: citeturn1search2\n\n    def f():\n        return 1\u30101-x\u3011";
-    const clean = cleanAnswer(raw);
-    expect(clean).toContain("\n    def f():");
-    expect(clean).toContain("\n        return 1");
-    expect(clean).not.toMatch(/cite|【/);
-  });
-
-  it("cleans citation tokens out of a streamed answer", async () => {
-    stub = await startStubCopilot({
-      respond: () => [delta("Reviewed. citeturn1search3 "), delta("All good."), completion()],
-    });
-    expect((await sessionFor(stub).run("hi", { grounded: true })).text).toBe("Reviewed. All good.");
-  });
-
-  it("does NOT run on an ungrounded turn, so coding indentation survives verbatim", async () => {
-    // The regression the review caught: cleanAnswer must not touch a coding turn.
+  it("passes a coding answer through verbatim, indentation included", async () => {
     stub = await startStubCopilot({ respond: () => [delta("def f():\n    if x:\n        return  1"), completion()] });
-    const result = await sessionFor(stub).run("write a function"); // grounded defaults false
+    const result = await sessionFor(stub).run("write a function");
     expect(result.text).toBe("def f():\n    if x:\n        return  1");
   });
 });
