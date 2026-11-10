@@ -32,8 +32,16 @@ Enforced in code by `src/egress.ts` (TLS, port 443, exact hosts, per purpose):
 | Chat and image upload | `substrate.office.com` | every model turn |
 | Copilot Studio agent | `api.bap.microsoft.com`, `*.environment.api.powerplatform.com` | only with `studioAgent: true` / `M365_STUDIO_AGENT=1` |
 
+Redirects are never followed (a hop would otherwise go unchecked). The `baseUrl` option,
+for pointing the plugin at an already-running proxy, is accepted only for a loopback
+address: opencode sends every prompt to it.
+
 The sign-in browser window is outside that guard: it shows Microsoft's (or your IdP's)
 sign-in pages and loads whatever they reference.
+
+Nothing is loaded from outside this checkout: the bundle's only runtime `require`s are
+Node built-ins (ws's optional native add-ons are stubbed out), and `login` loads
+Playwright only from this checkout's own `node_modules`.
 
 ## The local proxy
 

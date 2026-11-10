@@ -40,8 +40,9 @@ npm ci --ignore-scripts      # exactly the locked versions from registry.npmjs.o
 npm test                     # typecheck + suite, with all non-loopback network blocked
 npm run build                # writes dist/
 
-# Sign-in needs Playwright to drive a browser window. Install it next to the checkout
-# (no install scripts, nothing saved to package.json) and use a browser you already have:
+# Sign-in needs Playwright to drive a browser window. Install it inside the checkout (no
+# install scripts, nothing saved to package.json; a copy anywhere else is refused) and
+# use a browser you already have:
 npm i --no-save --ignore-scripts playwright
 M365_BROWSER_CHANNEL=msedge node dist/cli.mjs login   # or chrome; or CHROMIUM_PATH=/path/to/browser
 # (Alternatively `npx playwright install chromium` downloads Playwright's own Chromium.)
@@ -237,7 +238,7 @@ That stub run says nothing about Microsoft's side; see [Development](#developmen
       "leanSystemPrompt": false, // replace opencode's prose prompt (default: false)
       "setDefaultModel": true,   // set `model` if you have not (default: true)
       "setSmallModel": true,     // answer session titles locally (default: true)
-      "baseUrl": null,           // use an already-running proxy instead of an in-process one
+      "baseUrl": null,           // use an already-running proxy on this machine (loopback only)
       "apiKey": null             // that proxy's secret (or export M365_PROXY_KEY instead)
     }
   }]
