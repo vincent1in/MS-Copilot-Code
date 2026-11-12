@@ -1,27 +1,99 @@
 # opencode-m365-copilot (safety-reviewed fork)
 
+Use your work account's **Microsoft 365 Copilot Chat** as the AI model in
+[OpenCode](https://opencode.ai). This is Microsoft Copilot, not GitHub Copilot. A personal
+Microsoft account's Copilot won't work: it is a different service. You don't need Copilot
+Studio.
+
 > **This is a reviewed fork** of [chrischall/opencode-copilot-plugin](https://github.com/chrischall/opencode-copilot-plugin)
 > (MIT), taken at upstream `v2.2.1` (`2c03d2f`). See **[SECURITY_REVIEW.md](SECURITY_REVIEW.md)** for what
 > was checked, how, and every change. In short, compared with upstream:
 >
-> - **Nothing is installed from npm.** The package is `private`, and `setup` registers this
->   checkout's build by path. Install from source (below), never `npm install -g`.
-> - **Outbound traffic is allowlisted in code**: `login.microsoftonline.com`, `substrate.office.com`,
->   and (only if you opt in to the Studio agent) Power Platform. Tests and CI fail on any other
->   connection attempt.
-> - **No changes to your tenant by default**: the Copilot Studio agent is opt-in (`studioAgent`).
+> - **Two addresses and nothing else.** It connects to `login.microsoftonline.com` to sign in and
+>   `substrate.office.com` for Copilot, enforced in code. CI fails on any other connection attempt.
+> - **No analytics, update checks or downloads.** The sign-in library's reports about itself are
+>   stripped, and the sign-in window's own background services are switched off.
+> - **Nothing is created in your tenant.** Upstream's Copilot Studio agent is removed.
 > - **Interactive sign-in only**: no stored password or TOTP seed.
-> - **Bing web search is opt-in** on coding turns (`webSearch`).
-> - **No mailbox-grounded `work` models.**
-> - **Default model `gpt-6.1-sol`**, the best-measured choice for accounts without Copilot Studio.
+> - **Your work data stays out.** Bing web search is off, the mailbox-grounded models are removed,
+>   and a reply Copilot drew from your email, files or chats is held back by default.
+> - **A page on your computer** walks you through setup and shows exactly what each turn sends.
+> - **Nothing is installed from npm.** OpenCode loads the gateway from its folder, never from the registry.
 
-Use your organisation's **Microsoft 365 Copilot** as the model backend for
-[opencode](https://opencode.ai).
+## Quick start
+
+You need:
+
+- the OpenCode you already have (version 2), installed from npm;
+- Node.js 22 or later;
+- Microsoft Edge or Google Chrome, for the sign-in window;
+- a work or school account with Microsoft 365 Copilot Chat.
+
+1. **Download** `opencode-m365-copilot-2.3.0.zip` and `opencode-m365-copilot-2.3.0.zip.sha256`.
+   Check the zip: `shasum -a 256 -c opencode-m365-copilot-2.3.0.zip.sha256` on macOS and Linux,
+   or `Get-FileHash opencode-m365-copilot-2.3.0.zip` in PowerShell on Windows, compared with the
+   `.sha256` file. Unzip it somewhere it can stay: OpenCode loads the gateway from this folder.
+2. **Start the page.** In that folder, run `sh start.sh` (macOS, Linux) or double-click
+   `start.cmd` (Windows). The gateway's page opens in your browser.
+3. **Follow Set up** on the page:
+   1. *Sign in to Microsoft 365.* A browser window opens on Microsoft's sign-in page.
+   2. *Send a test message.* You see the exact text that went to Copilot, and its reply.
+   3. *Connect OpenCode.* Add the folder to `plugins` in OpenCode's config file. The page
+      shows the file, the lines to add and copy buttons. It never edits the file itself.
+4. **Start OpenCode** in your project with `opencode`. The gateway's models are listed as
+   `m365/…`, and `m365/gpt-6.1-sol` is used when you don't pick one.
+
+The zip holds everything that runs: the built gateway (`dist/`), Playwright for the sign-in
+window, the source it was built from, and `SHA256SUMS` for every file. Nothing is installed
+or downloaded, and you don't need npm. Once you're set up you can close the page: OpenCode
+runs its own copy of the gateway. To watch OpenCode's turns as well, choose what happens
+*When OpenCode starts* under Settings.
+
+Rather use a terminal? `node dist/cli.mjs login` signs in, and `node dist/cli.mjs setup --quiet`
+adds the folder to OpenCode's config for you, keeping a backup of the old file.
+
+## What leaves your computer
+
+**The gateway** connects to two addresses, both Microsoft's: `login.microsoftonline.com` to
+sign in and refresh the token, and `substrate.office.com` for Copilot. Every other address is
+refused in code (`src/egress.ts`), and CI runs the build and every test with no route off
+the machine. It sends no analytics, checks for no updates and downloads nothing. Microsoft's
+sign-in library (MSAL) adds its own name, version, operating system and CPU to each sign-in
+and token request; the gateway takes those off, because signing in doesn't need them.
+
+**The sign-in window** is Edge or Chrome on Microsoft's sign-in page, which loads what it
+needs from Microsoft, and from your company's sign-in provider if it has one. The window has
+its own profile, apart from your everyday browsing. Browsers also contact their makers on
+their own: measured with Chrome 153, a sign-in window left open for 90 seconds called three
+Google services (an account check, a push-messaging check-in and component updates). The
+gateway turns those off when it opens the window, and the same test then found no outside
+connection at all. Edge wasn't available to measure; its own Microsoft services follow your
+organization's Edge policies. To check your own browser, run `node dist/cli.mjs doctor --browser`:
+it opens the sign-in browser on an empty page for a minute and lists everything it tries to
+contact by itself, refusing all of it.
+
+**The page** is served on 127.0.0.1 only, and Traffic and Checks stay in memory. The only
+file it writes is your settings, `~/.config/opencode-copilot/settings.json`.
+
+**OpenCode itself** is not covered by this review and has its own outside traffic. Its config
+switches some of it off; these are the page's optional lines: `"update": "disable"` (update
+checks), `"share": "disabled"` (session sharing) and `"websearch": false` (its web search
+tool). Other OpenCode features can reach out or fetch tools when you use or configure them:
+language servers and formatters (`lsp`, `formatter`), MCP servers, `skills` and
+`instructions` given as URLs, and Git `references`. In OpenCode 2.2.6's packages, its
+OpenTelemetry export runs only once you configure an endpoint. For the rest, such as how it
+gets its list of models, see OpenCode's own documentation.
+
+**npm** isn't needed for the release. In a source checkout, `.npmrc` turns off npm's update
+check, funding notices and the dependency report it would send on every install, and never
+runs install scripts.
+
+## How it works
 
 M365 Copilot has no developer API. It is an undocumented SignalR-over-WebSocket service
 (`substrate.office.com`) that Microsoft intends only its own clients to speak to. This
 package implements that protocol, wraps it in an OpenAI-compatible proxy, and ships an
-opencode plugin that starts the proxy in-process and registers it as a provider.
+OpenCode plugin that starts the proxy in-process and registers it as a provider.
 
 ```
 opencode ──OpenAI /v1──▶ in-process proxy ──SignalR/WS──▶ M365 Copilot
@@ -29,33 +101,26 @@ opencode ──OpenAI /v1──▶ in-process proxy ──SignalR/WS──▶ M3
                               └── local-title model, answered without any M365 call
 ```
 
-## Install (from source — the only supported way for this fork)
+## From source
 
-Needs Node 22+ and git. Every step below is explicit about what it downloads.
+Needs Node 22+ and git. Every step says what it downloads.
 
 ```sh
-git clone https://github.com/vincent1in/opencode-m365-copilot.git
-cd opencode-m365-copilot
-npm ci --ignore-scripts      # exactly the locked versions from registry.npmjs.org, no install scripts
+git clone https://github.com/vincent1in/MS-Copilot-Code.git
+cd MS-Copilot-Code
+npm ci --ignore-scripts      # exactly the locked versions from registry.npmjs.org, Playwright included; no install scripts
 npm test                     # typecheck + suite, with all non-loopback network blocked
 npm run build                # writes dist/
-
-# Sign-in needs Playwright to drive a browser window. Install it inside the checkout (no
-# install scripts, nothing saved to package.json; a copy anywhere else is refused) and
-# use a browser you already have:
-npm i --no-save --ignore-scripts playwright
-M365_BROWSER_CHANNEL=msedge node dist/cli.mjs login   # or chrome; or CHROMIUM_PATH=/path/to/browser
-# (Alternatively `npx playwright install chromium` downloads Playwright's own Chromium.)
-
-node dist/cli.mjs setup      # points ~/.config/opencode/opencode.json at this checkout
-opencode                     # models appear as m365/*
+sh start.sh                  # the same page as the release
 ```
 
-`setup` writes only a reference to this checkout's directory — never an npm package name,
-so opencode cannot fetch anything from the registry for this plugin — and replaces an
-upstream `opencode-m365-copilot` entry if it finds one. The provider, the model list and
-the default model are all registered by the plugin at startup. After pulling changes,
-re-run `npm ci --ignore-scripts && npm test && npm run build`.
+`scripts/release.sh` builds the release zip from a clean checkout.
+
+The page's instructions and `setup` only ever point OpenCode at this folder, never at an
+npm package name, so OpenCode cannot fetch anything from the registry for this plugin.
+`setup` also replaces an upstream `opencode-m365-copilot` entry if it finds one. The
+provider, the model list and the default model are all registered by the plugin at
+startup. After pulling changes, re-run `npm ci --ignore-scripts && npm test && npm run build`.
 
 Needs **opencode 2** — from 2.0.0 the major version tracks it. On opencode 1, stay on
 0.4.x — see [opencode 1](#opencode-1).
@@ -136,19 +201,11 @@ Scalar arguments are `key: value` header lines, one free-form argument is the fe
 and an old/new pair is written as a SEARCH/REPLACE diff. A JSON `{"tool": …}` contract
 was tried in the reference project and scored 0/5 on real agentic tasks.
 
-The other half is a **Copilot Studio declarative agent**. **In this fork it is opt-in**
-(`"studioAgent": true` or `M365_STUDIO_AGENT=1`); when enabled, it is provisioned on
-the first turn that carries tools. Microsoft's server-side prompt outranks anything we
-send, so per-request instructions get answered in prose; instructions delivered through
-an agent land in the server-side system prompt and are obeyed. The agent is named after
-a hash of its instructions, so hosts on a tenant converge on one, and it is never
-deleted — another host may be mid-conversation with it.
-
-Without it (this fork's default, and the only option without Copilot Studio access), tool
-turns run agent-less: the fenced contract goes out with every request, and the default
-model `gpt-6.1-sol` uses the user-voice `relay` framing measured to work agent-less (see
-[Models](#models)). Nothing is created in your tenant and no Power Platform token is
-requested.
+Every tool turn runs agent-less: the fenced contract goes out with every request, and the
+default model `gpt-6.1-sol` uses the user-voice `relay` framing measured to work agent-less
+(see [Models](#models)). Upstream could also route tool turns through a Copilot Studio
+agent that it created and published in your tenant. This fork removed that, so nothing is
+ever created in your tenant and no Power Platform token is requested.
 
 Four things keep a turn on track:
 
@@ -225,21 +282,35 @@ answered locally — one chat turn reaches the backend, not two. The catalog rec
 also checked against the real `@opencode/plugin` schema constructors in the test suite.
 That stub run says nothing about Microsoft's side; see [Development](#development) for what has been run live.
 
-## Configuration
+## Settings
+
+Every setting is on the page's **Settings** tab, in plain words, and saved in
+`~/.config/opencode-copilot/settings.json` (readable only by you). The gateway inside
+OpenCode reads the same file. Changes apply from the next message; *When OpenCode starts*
+applies the next time OpenCode starts.
+
+| Setting | Default | Plugin option | Environment variable |
+|---|---|---|---|
+| When Copilot uses your work data | hold the reply | `workIq` | `M365_WORK_IQ` |
+| Bing web search | off | `webSearch` | `M365_WEB_SEARCH=1` |
+| Trim OpenCode's tools | on | `lean` | |
+| Write session titles on this computer | on | `setSmallModel` | |
+| Short system prompt | off | `leanSystemPrompt` | |
+| Default model in OpenCode | on | `setDefaultModel` | |
+| When OpenCode starts (this page) | off | `monitor: true` starts it | `M365_MONITOR=1` |
+| Browser for signing in | Edge, else Chrome | | `M365_BROWSER_CHANNEL`, `CHROMIUM_PATH` |
+
+You don't need the plugin options or the environment variables. If you set them, an
+environment variable wins over a plugin option, which wins over the page; the page then
+shows the setting as locked and says where it is set. Plugin options go on the gateway's
+entry in OpenCode's config:
 
 ```jsonc
 {
   "plugins": [{
-    "package": "/path/to/your/opencode-m365-copilot",   // what `setup` writes: this checkout
+    "package": "/path/to/opencode-m365-copilot",   // this folder
     "options": {
-      "studioAgent": false,      // create a Copilot Studio bot in your tenant (default: false)
-      "webSearch": false,        // let Copilot use Bing on coding turns (default: false)
-      "workIq": "hold",          // a reply drawn from your work data: "hold" | "flag" | "allow"
-      "monitor": false,          // run the gateway monitor page (default: false)
-      "lean": true,              // trim the toolset (default: true)
-      "leanSystemPrompt": false, // replace opencode's prose prompt (default: false)
-      "setDefaultModel": true,   // set `model` if you have not (default: true)
-      "setSmallModel": true,     // answer session titles locally (default: true)
+      "workIq": "hold",          // "hold" | "flag" | "allow"
       "baseUrl": null,           // use an already-running proxy on this machine (loopback only)
       "apiKey": null             // that proxy's secret (or export M365_PROXY_KEY instead)
     }
@@ -289,16 +360,19 @@ on the real model — they are real work, and only titling opens the extra conve
 `setSmallModel` turns this off; the name dates from opencode 1, where it set
 `small_model`. Any OpenAI client can also select `m365/local-title` by id.
 
-## Gateway monitor
+## The gateway's page
 
-A page on this machine that shows, turn by turn, what crossed between opencode, the
-gateway and Microsoft 365 Copilot. It is **off by default**: turn it on with
-`{ "monitor": true }` in the plugin options or `M365_MONITOR=1`, or run
-`opencode-m365 serve --monitor`. Then open the link `opencode-m365 monitor` prints
-(`serve --monitor` prints it directly).
+`opencode-m365 start` (or `start.sh`, `start.cmd`) runs a gateway with its page and opens it.
+The page has four tabs: **Set up** (sign in, a test message, connecting OpenCode),
+**Traffic**, **Checks** and **Settings**.
 
-Each turn is laid out with this machine on the left and Microsoft 365 on the right, so
-anything on the right has left the machine:
+Inside OpenCode the gateway runs without a page unless you ask for one: under Settings,
+*When OpenCode starts* can start the page, or start and open it. `opencode-m365 open`
+opens the page of a gateway that is already running.
+
+**Traffic** shows, turn by turn, what crossed between OpenCode, the gateway and Microsoft
+365 Copilot. Each turn is laid out with this machine on the left and Microsoft 365 on the
+right, so anything on the right has left the machine:
 
 - **opencode sent**: the new messages (your prompt, tool output, the system prompt on the
   first turn), and which tools were passed on or left out.
@@ -335,9 +409,13 @@ The page is served by a second loopback listener, separate from the proxy, so th
   forbid framing, sniffing, caching and referrers.
 - Everything from opencode or Copilot is rendered as text, never as HTML.
 
-`opencode-m365 monitor` finds the link in an owner-only file under
-`~/.config/opencode-copilot/monitor/`. The file holds the link, not anything the page
-shows, and is deleted when the gateway stops.
+`opencode-m365 open` (and `opencode-m365 monitor`, which prints the link) find the link in an
+owner-only file under `~/.config/opencode-copilot/monitor/`. The file holds the link, not
+anything the page shows, and is deleted when the gateway stops.
+
+The page can also change things: save a setting, start a sign-in window, send the test
+message. Those need the same key, take JSON only, and the page never edits OpenCode's
+config.
 
 ## Work IQ (your work data)
 
@@ -358,17 +436,17 @@ checked for evidence instead:
 - **What doesn't:** the reply's own text. A SharePoint URL that is in your code is not
   grounding.
 
-What happens next is the `workIq` option (or `M365_WORK_IQ`):
+What happens next is the *When Copilot uses your work data* setting (or the `workIq` plugin option, or `M365_WORK_IQ`):
 
 | Policy | A reply drawn from work data | A search the gateway can't place | Web sources while Bing is off |
 |---|---|---|---|
 | `hold` (default) | **Held**: opencode gets `m365_work_data_held` instead of the reply, and the conversation is dropped | Flagged | Flagged |
-| `flag` | Passed on, flagged in the monitor | Flagged | Flagged |
+| `flag` | Passed on, flagged in Checks | Flagged | Flagged |
 | `allow` | Passed on, noted | Noted | Noted |
 
 Under `hold`, tool-less replies are buffered rather than streamed, because the evidence
-can arrive with the last frame. Every turn is checked whether or not the monitor is on.
-With the monitor on, each turn shows what Copilot searched and cited. If you turned on
+can arrive with the last frame. Every turn is checked whether or not the page is running.
+On the page, each turn shows what Copilot searched and cited. If you turned on
 `M365_TURN_LOG`, that debug file still records the raw reply of a held turn, as it
 records every reply.
 
@@ -381,17 +459,17 @@ interaction:
 - whether a jailbreak or cross-prompt injection was detected.
 
 The text itself can be kept under your organisation's retention policies. Everything on
-the monitor's Microsoft 365 side is what reaches that record.
+the page's Microsoft 365 side is what reaches that record.
 
 ## Models
 
 Models are selected by an M365 *tone*, not a model id. **In this fork `m365/gpt-6.1-sol` is
-the default** (upstream's was `m365/quick`): with the Studio agent opt-in, tool turns normally
-run agent-less, where the reference project measured GPT-6.1 Sol and GPT-6 Sol under the
+the default** (upstream's was `m365/quick`): tool turns run agent-less here, where the
+reference project measured GPT-6.1 Sol and GPT-6 Sol under the
 `relay` framing at 39/40 and 60/60 on its bench, and 30/30 driving a real agent, on accounts
 with no paid Copilot seat. Both serve on every work account with Copilot Chat. They are
-reasoning tones, so expect 10–30 s a turn; `m365/quick` is still there if you enable the
-Studio agent. These figures are the reference project's, not yet re-measured through this fork.
+reasoning tones, so expect 10–30 s a turn. These figures are the reference project's, not
+yet re-measured through this fork.
 The upstream measurements below are kept as they were.
 
 Tool-calling on a live tenant (2026-11-09, one non-Premium account, a single file-read
@@ -421,13 +499,10 @@ commands. Measured on `gpt-5.5-think-deeper` on 2026-11-10, 16 conversations:
 | Default, with the nudge | 8/8 | 5/8 |
 | Relay, with the nudge | 0/4 | 4/4, with no nudge needed |
 
-Claude tones stay on the agent, which M365 answers on GPT. The reference project ran
-Claude without the agent and with `relay`, but an account with no Claude licence then
-refuses every tool turn, and that could not be measured on a licensed account here.
-
-A non-default tone (Claude, the reasoning tones) only takes effect when **no** agent is
-attached — with one, M365 silently routes to GPT regardless. The proxy therefore attaches
-the agent only on turns that carry tools, so plain chat reaches the model the tone selects.
+Claude tones run agent-less with the default framing. On an account with no Claude licence,
+M365 refuses their tool turns (`ClaudeUnavailableForLicense`); upstream hid that by attaching
+its Studio agent, which M365 answers on GPT. With no agent ever attached here, the tone you
+pick is the model that answers.
 
 ### No mailbox-grounded models in this fork
 
@@ -438,19 +513,23 @@ model and never grounds on your account's content.
 
 ## Authentication
 
-Sign-in is a CLI concern, never the plugin's: the plugin only refreshes silently and asks
-you to run `opencode-m365 login` if it cannot. A plugin running underneath a TUI has no
-business opening a browser.
+Sign-in happens on the page (Set up, step 1) or with `opencode-m365 login`, never inside
+OpenCode: the plugin only refreshes silently, and asks you to sign in on the page if it
+cannot. A plugin running underneath a TUI has no business opening a browser.
 
-Sign-in is **interactive only** in this fork: `opencode-m365 login` opens a visible browser
-window and you complete SSO/MFA by hand, once. Upstream's automated mode (a stored password
-plus TOTP seed in `secrets.json`) is removed — a file holding both factors lets anyone who
-can read it pass MFA as you. If an old `secrets.json` is still on disk, `doctor` tells you
-to delete it; nothing reads it.
+Sign-in is **interactive only** in this fork: a visible browser window opens and you
+complete SSO/MFA by hand, once. Upstream's automated mode (a stored password plus TOTP seed
+in `secrets.json`) is removed — a file holding both factors lets anyone who can read it pass
+MFA as you. If an old `secrets.json` is still on disk, `doctor` tells you to delete it;
+nothing reads it.
 
-Use a browser you already have with `M365_BROWSER_CHANNEL=msedge` (or `chrome`) or
-`CHROMIUM_PATH=/path/to/browser`; otherwise Playwright's own Chromium must have been
-installed explicitly (`npx playwright install chromium`). Nothing downloads a browser for you.
+The window uses a browser you already have: Edge, else Chrome, or the one you pick under
+Settings. `M365_BROWSER_CHANNEL=msedge` (or `chrome`) or `CHROMIUM_PATH=/path/to/browser`
+override that. Playwright's own Chromium is used only if you installed it yourself
+(`npx playwright install chromium`); nothing downloads a browser for you. The window keeps
+its own profile in `~/.config/opencode-copilot/browser-profile/`, and the gateway switches
+off the browser's own background services before it opens (see
+[What leaves your computer](#what-leaves-your-computer)).
 
 It is one-time; afterwards tokens refresh from the MSAL cache.
 
@@ -465,16 +544,24 @@ which belongs to the m365-copilot-proxy project.
 ## CLI
 
 ```sh
+opencode-m365 start [--port 4141] [--no-open]
+                                      # the gateway and its page: set up, traffic, settings
+opencode-m365 open                    # open the page of a gateway that is already running
 opencode-m365 login                   # sign in (browser window, SSO/MFA by hand)
-opencode-m365 setup                   # point opencode at this checkout's build
-opencode-m365 serve [--port 4141]     # run the proxy standalone, for any OpenAI client
+opencode-m365 setup [--quiet]         # add this folder to OpenCode's config, keeping a backup;
+                                      # --quiet also turns off OpenCode's update checks,
+                                      # session sharing and web search
+opencode-m365 serve [--port 4141]     # only the proxy, for any OpenAI client
                                       # (send its key as `Authorization: Bearer`)
-            [--monitor]               # ...and the gateway monitor; prints its link
-opencode-m365 monitor                 # print the monitor link of each running gateway
-opencode-m365 doctor [--live]         # check auth, proxy and opencode wiring (read-only;
-                                      # never provisions the Studio agent)
-                                      # (--live sends one short message per model tone)
+            [--monitor]               # ...and the page; prints its link
+opencode-m365 monitor                 # print the page link of each running gateway
+opencode-m365 doctor [--live]         # check sign-in, the proxy and OpenCode (read-only;
+                                      # --live sends one short message per model tone)
+            [--browser]               # ...and list what the sign-in browser contacts by
+                                      # itself in a minute (refused, not sent)
 ```
+
+In the release folder these are `node dist/cli.mjs <command>`.
 
 ## Images
 
@@ -529,8 +616,8 @@ Tests run against a stub SignalR server (`test/stub-copilot.ts`) that speaks the
 framing, so a full turn — including the mandatory `Metrics` frame, ping handling,
 Disengaged detection and the stop-on-abort frame — is exercised offline.
 
-Chat, tool calling and agent provisioning have been run against one live tenant, through
-opencode 2.2.5. Image upload has not, and file edits, shell commands and multi-step tasks
+Chat and tool calling (and upstream's agent provisioning, since removed) have been run
+against one live tenant, through opencode 2.2.5. Image upload has not, and file edits, shell commands and multi-step tasks
 have not been exercised there. Other M365 behaviour is implemented from the protocol notes in
 [cramt/m365-copilot-proxy](https://github.com/cramt/m365-copilot-proxy) (MIT), whose
 `docs/` are the source of truth for this surface. Run `opencode-m365 doctor --live`

@@ -31,16 +31,14 @@ export type CheckName =
 
 export type Verdict = "allowed" | "denied" | "held" | "flagged" | "info";
 
-/** The gateway's settings, as the page's header shows them. Sent once per connection. */
+/** Which gateway this page belongs to. Sent once per connection. */
 export interface GatewayFacts {
-  /** Where opencode reaches the proxy. The proxy's secret is never recorded. */
+  /** The standalone app (`opencode-m365 start`), or the gateway inside OpenCode. */
+  context: "app" | "opencode";
+  /** Where clients reach the proxy. The proxy's secret is never recorded. */
   proxy: string;
   pid: number;
   defaultModel: string;
-  webSearch: boolean;
-  studioAgent: boolean;
-  lean: boolean;
-  workIq: string;
   startedAt: string;
 }
 

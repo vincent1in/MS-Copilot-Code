@@ -174,10 +174,70 @@ These cannot be fixed in code. Decide on them deliberately.
 2. Whether the Work IQ button's off state can be requested explicitly is unknown. Capturing what the real Copilot web client sends with the button off, on a licensed account, would settle it.
 3. Neither feature has run against a live tenant yet.
 
+## Addendum: the setup page, settings, data-exit audit and malware check (branch `app-ui`, 2.3.0)
+
+2026-11-12, by Claude, on top of `gateway-monitor`. The account this fork is for has Copilot Chat but no Copilot Studio, so the Studio code is gone. The page from the previous addendum becomes the app's front door, with setup and every setting on it. It is reviewed on the same terms, followed by a fresh audit of what leaves the machine and a malware and supply-chain check of everything that ships.
+
+| # | Topic | Decision and why | Enforced by |
+|---|---|---|---|
+| A1 | **Copilot Studio removed.** Upstream's agent created and published a bot in your tenant (F3). | The agent code, its Power Platform and BAP scopes, hosts and options are deleted. A `studioAgent` option left in an old config is ignored with a warning. The allowlist is now exactly two hosts: `login.microsoftonline.com` and `substrate.office.com`. The Studio rows in the tables above describe the code before this change. | `src/egress.test.ts` (two-host table), `src/runtime.test.ts` |
+| A2 | **The sign-in library reports on itself.** MSAL adds `x-client-SKU`, `-VER`, `-OS` and `-CPU`, two telemetry headers (`x-client-current-telemetry`, `x-client-last-telemetry`) and `x-app-name`/`-ver`. They go into the authorize URL, token request bodies and headers. | All are stripped, by the guarded network client and from the authorize URL before the browser opens it. They describe the library and the machine, not the sign-in. Two are kept: `client-request-id`, the id Microsoft's sign-in logs use to correlate a request, and `x-ms-lib-capability`. | `src/egress.test.ts` ("MSAL's reports about itself") |
+| A3 | **The page can now change things.** | New endpoints on the page's own listener: `GET /api/state` and `POST /api/settings`, `/api/sign-in`, `/api/test`. They have M1's protections (key, `Host`, `Origin`, `Sec-Fetch-Site`) and accept JSON only, up to 16 KB.<ul><li>Values must be one of each setting's fixed choices. A setting pinned by an environment variable or plugin option answers 409.</li><li>Sign-in exists only on the page `start` serves, because it opens a window on this machine. Inside OpenCode, the page shows the command instead.</li><li>The test message is one fixed prompt, sent through the in-process proxy on loopback, so it is checked and shown like any turn.</li><li>The page never edits OpenCode's config: it shows instructions. `setup`, a command you run, does edit it and keeps a backup.</li></ul> | `src/monitor/server.test.ts` ("the setup endpoints"), `src/monitor/app.test.ts` |
+| A4 | **A settings file.** | `settings.json` is written `0600` in the `0700` config dir. It is re-read when it changes, so the gateway inside OpenCode follows the page. Unknown keys and invalid values are ignored. Precedence: environment, then plugin option, then the file, then the default. | `src/settings.test.ts` |
+| A5 | **A process is started.** `start`, `open` and the setting "Start it and open it in the browser" open the page. | The OS's URL opener runs with no shell: `open`, `xdg-open` or `rundll32 url.dll,FileProtocolHandler`. It only accepts a link that matches the local page's pattern. While it runs, the page key is visible in that process's arguments; `--no-open` avoids that on a shared machine. This is the only `child_process` use in the code. | `src/open-url.ts` (the call-site list below) |
+| A6 | **The sign-in browser's own traffic.** Playwright already launches with most background networking off. | Measured with Chrome 153 behind a local proxy that refuses and logs everything: a visible window idle on `about:blank` for 90 s still called `accounts.google.com` (`/ListAccounts`, 5×), `android.clients.google.com` (`/checkin`, 3×) and `update.googleapis.com` (component updates, 3×). The window now starts with those three services pointed at `127.0.0.1:9`, and the same measurement found **0** connections. `doctor --browser` runs this measurement on your own browser, reading the browser's network log too, so a policy-set proxy can't hide traffic. Edge was not available to measure. | `src/login.test.ts` |
+| A7 | **Other programs that might fetch something because of us.** | `setup` no longer adds a `$schema` link to OpenCode's config: editors download the schema from opencode.ai when they open a file that names one. One already there is kept. `.npmrc` adds `audit=false`, so npm stops sending the dependency list to the registry on every install. | `src/config.test.ts` |
+| A8 | **The release zip.** | `scripts/release.sh` builds it from a clean commit, with no network where `unshare` allows. It holds `git archive` of the commit, `dist/`, `playwright` and `playwright-core` from the lockfile install, `BUILD-INFO.txt` and `SHA256SUMS`. Timestamps and order are fixed, so a commit gives the same zip. | the script |
+
+### What leaves the machine (measured)
+
+| Check | Result |
+|---|---|
+| CI path: typecheck, build and all tests in a network namespace, guard blocking | 38 Node processes and threads guarded, **0** non-loopback attempts (plus the guard's 5 self-test probes); 637 tests |
+| Production paths under the guard: `help`, `doctor`, `setup --quiet`, `start`, then the page's state, a setting saved twice and a test message | 6 Node processes, 17 loopback connections, **0** non-loopback attempts |
+| Call sites in shipped source | Network: `session.ts` (WebSocket), `image.ts` and `egress.ts` (`fetch`), all through the allowlist. Loopback only: `cli.ts` (`doctor`'s self-check), `monitor/app.ts` (the test message), the page's script (same origin; its CSP allows no other). Process: `open-url.ts`. Dynamic imports: fixed names only. |
+| Runtime `require` in the bundle | Node built-ins only. Playwright is loaded only by sign-in and `doctor --browser`, from the checkout. |
+| Addresses in the bundle | The two allowlisted hosts. `m365.cloud.microsoft` appears as an `Origin`/`Referer` header value, not a destination. `127.0.0.1:9` is A6. As before, MSAL's sovereign-cloud and IMDS addresses are unreachable through the guarded client, and the rest are links in library comments. |
+| Playwright's own side, opening the browser | 0 non-loopback attempts from Node. Its download hosts (`cdn.playwright.dev`, `playwright.download.prss.microsoft.com`, `edgeupdates.microsoft.com`) are used only by an explicit `playwright install`. There is no telemetry: the only mention is the Firefox preferences that turn Firefox's reporting off. |
+
+### Malware and supply chain
+
+| Check | Result |
+|---|---|
+| Lockfile | Unchanged since the original review apart from the version: 375 entries, all `registry.npmjs.org` with `sha512`. The only install script is `fsevents` (dev, optional, macOS), and `ignore-scripts` means it never runs. |
+| Installed tree vs. the registry | A fresh `npm ci --ignore-scripts`, which checks every tarball against the lockfile, is identical to the tree everything was built and tested with (306 packages on Linux), apart from test caches. |
+| Registry signatures | Every one of the 306 installed versions has a valid npm registry ECDSA signature over `name@version:integrity`, checked against the registry's published keys. 137 also carry provenance attestations, which were not verified (that needs Sigstore). `npm audit signatures` itself could not run: the sandbox refused its Sigstore download (403). **Run it locally.** |
+| Known vulnerabilities | `npm audit`: 0 runtime, 0 overall. |
+| The two shipped packages | `playwright` and `playwright-core` 1.65.0 were downloaded again. The tarballs' `sha512` equals the lockfile's, and their files are byte-identical to the ones in the zip. |
+| Reproducible build | `dist/` built from the fresh install, inside a network namespace, is byte-identical to the `dist/` that ships. |
+| Our source | 93 files. No bidirectional, invisible or format characters; the non-ASCII is typographic (dashes, arrows, ellipses). No `eval`, `new Function`, `vm` or obfuscation. base64 appears only in JWT claims, image data URLs and random keys. The longest line is prompt text. |
+| Antivirus | ClamAV installed, but the sandbox blocked its signature download (`database.clamav.net`), so **no antivirus scan was run**. Scan the zip with your own antivirus; Microsoft Defender scans downloads on Windows. |
+
+### Are the packages the real, popular ones?
+
+Each of the 306 installed packages was looked up on registry.npmjs.org. npm's download-stats API is blocked in the sandbox, but the registry's search results carry the same weekly counts. For each package the check took weekly downloads, dependents, the account that published the installed version, the repository, publish dates, and any name one or two edits away from a much more downloaded package.
+
+| Check | Result |
+|---|---|
+| What ships (the 19 packages bundled into `dist/`, plus Playwright) | All long-established, from the projects you'd expect, at 30M to 1.2B downloads a week. Microsoft's MSAL (`@azure/msal-node`, `@azure/msal-common`) is published by Microsoft's `azuread` account. `ws` is published by its maintainer `lpinca`. `zod` and `playwright` come through GitHub Actions trusted publishing from `colinhacks/zod` and `microsoft/playwright`. Then `jsonwebtoken` (auth0), `jws`, `jwa`, the `lodash.*` single-function packages (jdalton), `ms` (vercel), `semver` (npm), `safe-buffer`, `buffer-equal-constant-time` and `ecdsa-sig-formatter`. |
+| Popularity, all 306 | 272 have at least 10M downloads a week, 26 have 1M–10M and 5 have 100k–1M. None are below 100k. The five are OpenCode's own `@opencode/plugin`, `/ai` and `/util` (about 0.6M a week, first published September 2026), and `yuku` with its Linux binary (0.4M–0.7M, a parser that `tsdown` uses). |
+| Not in npm's search | Three packages, because search hides deprecated ones. `@opentelemetry/sdk-trace-base` and `-node` are OpenTelemetry's official packages, now replaced by `@opentelemetry/sdk-trace`. `node-domexception` is jimmywarting's, used by `node-fetch`. All three are dev-only. |
+| Look-alike names | One pair: `just-diff` (8.7M a week, angus-c/just) next to `jest-diff` (97M). They are two genuine, unrelated projects. |
+| No repository listed | `@isaacs/nonrecursive-glob-match` and `promise-all-reject-late`, both published by `isaacs` (npm's creator). |
+| Deprecated | The three above, and `postcss-selector-parser` 7.2.0, whose fix is in 7.2.1. All are dev-only. |
+| Where the 306 come from | `@opencode/plugin`, which this code uses only for its TypeScript types, brings in 238 of them: AWS SDK, a Redis client, npm's installer libraries, OpenTelemetry, `effect`. They are installed by `npm ci` in a source checkout, never run during install (`ignore-scripts`), and none ship. The rest come from vitest (38), tsdown (28), MSAL (17) and the remaining few. |
+
+**Residual:**
+
+1. Edge's own background traffic was not measured. Run `node dist/cli.mjs doctor --browser` with Edge.
+2. OpenCode's own traffic is outside this review. The README lists what its config can switch off.
+3. The sign-in page's own requests, to Microsoft and your sign-in provider, are by nature outside the gateway's allowlist.
+4. None of this has run against a live tenant. Sign-in, the test message and the page were exercised against the offline stub.
+
 ## Re-verify it yourself
 
 ```sh
-git clone https://github.com/vincent1in/opencode-m365-copilot.git && cd opencode-m365-copilot
+git clone https://github.com/vincent1in/MS-Copilot-Code.git && cd MS-Copilot-Code
 npm ci --ignore-scripts
 npm audit --omit=dev && npm audit signatures
 
@@ -194,6 +254,16 @@ grep -ho '__require("[^"]*")' dist/*.mjs | sort -u
 
 # Every network/process/dynamic-code call site in shipped source:
 grep -rnE "fetch\(|new WebSocket|child_process|eval\(|new Function|import\(" src --include=*.ts | grep -v '\.test\.ts'
+
+# What the sign-in browser contacts by itself (a minute on an empty page, all of it refused):
+node dist/cli.mjs doctor --browser
+
+# A release zip: check it against its .sha256, then every file against SHA256SUMS.
+shasum -a 256 -c opencode-m365-copilot-2.3.0.zip.sha256
+unzip -q opencode-m365-copilot-2.3.0.zip && cd opencode-m365-copilot-2.3.0 && shasum -a 256 -c SHA256SUMS
+# Rebuild dist/ from the zip's own source and lockfile, in a copy, and compare:
+cp -R . ../rebuild && cd ../rebuild && npm ci --ignore-scripts && npm run build \
+  && diff -r dist ../opencode-m365-copilot-2.3.0/dist && echo "dist/ is identical"
 ```
 
 ## Taking upstream changes later

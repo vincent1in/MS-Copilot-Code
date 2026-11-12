@@ -11,13 +11,12 @@ import { turnScope } from "./scope.js";
 const PURPOSE: Record<EgressPurpose, string> = {
   auth: "Sign-in token request",
   chat: "Copilot connection",
-  studio: "Copilot Studio request",
 };
 
 export function recordEgress(monitor: Monitor): () => void {
   return onEgress((decision) => {
     const turn = turnScope.getStore();
-    const what = `${PURPOSE[decision.purpose]} to ${decision.host}`;
+    const what = `${PURPOSE[decision.purpose] ?? "Request"} to ${decision.host}`;
     const summary = !decision.allowed
       ? `${what} was refused. ${decision.reason ?? ""}`.trim()
       : decision.loopback

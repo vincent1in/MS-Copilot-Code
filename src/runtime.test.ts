@@ -1,10 +1,13 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { getOrCreateAgent } from "./agent.js";
-import { startRuntime, type M365Runtime } from "./runtime.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { listMonitorLinks } from "./monitor/links.js";
+import { startRuntime as startRuntimeWith, type M365Runtime } from "./runtime.js";
 
-// Stand-in for the Copilot Studio provisioning, so a test can see whether the
-// runtime ever reaches for it without any network or tenant involved.
-vi.mock("./agent.js", () => ({ getOrCreateAgent: vi.fn(async () => null) }));
+/** Every runtime here reads a private, empty settings file, never the real one. */
+const settingsFile = () => join(mkdtempSync(join(tmpdir(), "m365-runtime-")), "settings.json");
+const startRuntime = (options?: Record<string, unknown>, file = settingsFile()) => startRuntimeWith(options, { settingsFile: file });
 
 let runtime: M365Runtime | undefined;
 const savedKey = process.env.M365_PROXY_KEY;
@@ -52,39 +55,27 @@ describe("the proxy secret the plugin hands opencode", () => {
   });
 });
 
-describe("the Copilot Studio agent", () => {
-  const savedStudio = process.env.M365_STUDIO_AGENT;
-  afterEach(() => {
-    vi.mocked(getOrCreateAgent).mockClear();
-    if (savedStudio === undefined) delete process.env.M365_STUDIO_AGENT;
-    else process.env.M365_STUDIO_AGENT = savedStudio;
+describe("settings in the plugin", () => {
+  it("reads plugin options as settings, and ignores the removed studioAgent", async () => {
+    runtime = await startRuntime({ studioAgent: true, workIq: "flag" });
+    expect(runtime.settings.describe().workIq).toMatchObject({ value: "flag", source: "opencode" });
+    expect(Object.keys(runtime.settings.current())).not.toContain("studioAgent");
   });
 
-  /** One tool-carrying turn through the in-process proxy; its outcome does not matter. */
-  async function toolTurn(rt: M365Runtime): Promise<void> {
-    const response = await fetch(`${rt.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${rt.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "quick",
-        messages: [{ role: "user", content: "read the file" }],
-        tools: [{ type: "function", function: { name: "read", parameters: { type: "object", properties: { filePath: { type: "string" } } } } }],
-      }),
-    });
-    await response.text();
-  }
-
-  it("is never provisioned by default, even on a tool turn", async () => {
-    delete process.env.M365_STUDIO_AGENT;
+  it("starts no page unless the setting asks for one", async () => {
+    const before = listMonitorLinks().length;
     runtime = await startRuntime({});
-    await toolTurn(runtime);
-    expect(getOrCreateAgent).not.toHaveBeenCalled();
+    expect(listMonitorLinks().length).toBe(before);
   });
 
-  it("is provisioned on a tool turn when opted in", async () => {
-    delete process.env.M365_STUDIO_AGENT;
-    runtime = await startRuntime({ studioAgent: true });
-    await toolTurn(runtime);
-    expect(getOrCreateAgent).toHaveBeenCalledTimes(1);
+  it("starts the page when the saved setting asks for it, and removes its link on close", async () => {
+    const file = settingsFile();
+    writeFileSync(file, JSON.stringify({ pageWithOpenCode: "on" }));
+    const before = listMonitorLinks().length;
+    runtime = await startRuntime({}, file);
+    expect(listMonitorLinks().length).toBe(before + 1);
+    await runtime.close();
+    runtime = undefined;
+    expect(listMonitorLinks().length).toBe(before);
   });
 });

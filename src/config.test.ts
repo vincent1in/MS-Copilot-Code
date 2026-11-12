@@ -15,9 +15,6 @@ import {
   PACKAGE_NAME,
   resolveOptions,
   selectLeanTools,
-  monitorEnabled,
-  studioAgentEnabled,
-  webSearchEnabled,
 } from "./config.js";
 
 const names = (tools: readonly ToolDef[]) => tools.map((tool) => tool.function.name);
@@ -120,72 +117,11 @@ describe("selecting the toolset the model actually sees", () => {
   });
 });
 
-describe("plugin options", () => {
-  it("defaults to lean mode on", () => {
-    expect(resolveOptions(undefined).lean).toBe(true);
-    expect(resolveOptions({}).lean).toBe(true);
-  });
-
-  it("can be opted out of", () => {
-    expect(resolveOptions({ lean: false }).lean).toBe(false);
-  });
-
-  it("does not replace the harness's system prompt by default", () => {
-    // Trimming the toolset is a measured necessity; replacing the prose prompt is
-    // not, and it costs the project's own AGENTS.md rules if it goes wrong. Lean
-    // mode should not imply it.
-    expect(resolveOptions({}).leanSystemPrompt).toBe(false);
-    expect(resolveOptions({ lean: true }).leanSystemPrompt).toBe(false);
-  });
-
-  it("can be opted into explicitly", () => {
-    expect(resolveOptions({ leanSystemPrompt: true }).leanSystemPrompt).toBe(true);
-  });
-
-  it("defaults to managing the model default and the small model", () => {
-    const options = resolveOptions({});
-    expect(options.setDefaultModel).toBe(true);
-    expect(options.setSmallModel).toBe(true);
-  });
-
+describe("plugin connection options", () => {
   it("takes the secret of an external proxy as a string option", () => {
     expect(resolveOptions({ apiKey: "from-serve" }).apiKey).toBe("from-serve");
-    expect(resolveOptions({ apiKey: 42 as unknown as string }).apiKey).toBeUndefined();
+    expect(resolveOptions({ apiKey: 42 }).apiKey).toBeUndefined();
     expect(resolveOptions({}).apiKey).toBeUndefined();
-  });
-
-  it("keeps the Copilot Studio agent off unless explicitly asked for", () => {
-    // Provisioning creates and publishes a bot in the tenant; this fork never does that
-    // by default.
-    const saved = process.env.M365_STUDIO_AGENT;
-    delete process.env.M365_STUDIO_AGENT;
-    try {
-      expect(resolveOptions({}).studioAgent).toBe(false);
-      expect(studioAgentEnabled(resolveOptions({}))).toBe(false);
-      expect(studioAgentEnabled(resolveOptions({ studioAgent: "yes" as unknown as boolean }))).toBe(false);
-      expect(studioAgentEnabled(resolveOptions({ studioAgent: true }))).toBe(true);
-      process.env.M365_STUDIO_AGENT = "1";
-      expect(studioAgentEnabled(resolveOptions({}))).toBe(true);
-      expect(studioAgentEnabled()).toBe(true);
-    } finally {
-      if (saved === undefined) delete process.env.M365_STUDIO_AGENT;
-      else process.env.M365_STUDIO_AGENT = saved;
-    }
-  });
-
-  it("keeps Bing web search off on coding turns unless explicitly asked for", () => {
-    const saved = process.env.M365_WEB_SEARCH;
-    delete process.env.M365_WEB_SEARCH;
-    try {
-      expect(resolveOptions({}).webSearch).toBe(false);
-      expect(webSearchEnabled(resolveOptions({}))).toBe(false);
-      expect(webSearchEnabled(resolveOptions({ webSearch: true }))).toBe(true);
-      process.env.M365_WEB_SEARCH = "1";
-      expect(webSearchEnabled()).toBe(true);
-    } finally {
-      if (saved === undefined) delete process.env.M365_WEB_SEARCH;
-      else process.env.M365_WEB_SEARCH = saved;
-    }
   });
 
   it("accepts a baseUrl only on this machine, since opencode sends it every prompt and the key", () => {
@@ -207,7 +143,11 @@ describe("plugin options", () => {
 
   it("ignores option values of the wrong type instead of crashing the plugin", () => {
     // opencode passes plugin options straight from user JSON.
-    expect(resolveOptions({ lean: "yes" as unknown as boolean }).lean).toBe(true);
+    expect(resolveOptions({ baseUrl: 42, apiKey: {} })).toEqual({ baseUrl: undefined, apiKey: undefined });
+  });
+
+  it("leaves behaviour options to the settings store (see settings.test.ts)", () => {
+    expect(Object.keys(resolveOptions({ lean: false, webSearch: true, studioAgent: true }))).toEqual(["baseUrl", "apiKey"]);
   });
 });
 
@@ -237,9 +177,10 @@ describe("merging into an on-disk opencode.json", () => {
     expect(twice.plugins).toEqual(["opencode-m365-copilot"]);
   });
 
-  it("keeps the schema reference so editors still validate the file", () => {
-    const merged = mergeOpencodeConfig({}, { pluginRef: "opencode-m365-copilot" });
-    expect(merged.$schema).toBe("https://opencode.ai/config.json");
+  it("adds no schema link, which editors would download from opencode.ai, and keeps an existing one", () => {
+    expect(mergeOpencodeConfig({}, { pluginRef: "opencode-m365-copilot" })).not.toHaveProperty("$schema");
+    const kept = mergeOpencodeConfig({ $schema: "https://opencode.ai/config.json" }, { pluginRef: "opencode-m365-copilot" });
+    expect(kept.$schema).toBe("https://opencode.ai/config.json");
   });
 
   it("does not touch unrelated settings", () => {
@@ -527,29 +468,5 @@ describe("the v2 catalog entry, against opencode 2's own schema", () => {
     expect(() => decode({ ...model, status: "retired" })).toThrow();
     expect(() => decode({ ...model, limit: { context: "lots", output: 1 } })).toThrow();
     expect(() => decode({ ...model, capabilities: { tools: true, input: ["text"] } })).toThrow();
-  });
-});
-
-describe("monitor and Work IQ options", () => {
-  it("keeps the monitor off unless asked for", () => {
-    const saved = process.env.M365_MONITOR;
-    delete process.env.M365_MONITOR;
-    try {
-      expect(resolveOptions({}).monitor).toBe(false);
-      expect(monitorEnabled(resolveOptions({}))).toBe(false);
-      expect(monitorEnabled(resolveOptions({ monitor: true }))).toBe(true);
-      process.env.M365_MONITOR = "1";
-      expect(monitorEnabled(resolveOptions({}))).toBe(true);
-    } finally {
-      if (saved === undefined) delete process.env.M365_MONITOR;
-      else process.env.M365_MONITOR = saved;
-    }
-  });
-
-  it("accepts only a known Work IQ policy", () => {
-    expect(resolveOptions({ workIq: "flag" }).workIq).toBe("flag");
-    expect(resolveOptions({ workIq: "hold" }).workIq).toBe("hold");
-    expect(resolveOptions({ workIq: "everything" as never }).workIq).toBeUndefined();
-    expect(resolveOptions({}).workIq).toBeUndefined();
   });
 });

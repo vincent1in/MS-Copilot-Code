@@ -18,12 +18,17 @@ security review event, not a routine edit:
    dependency must be bundled, reviewed, and added to `packaging.test.ts`.
 4. **Interactive sign-in only.** Never reintroduce stored passwords, TOTP seeds or headless
    credential entry.
-5. **No tenant side effects by default.** The Copilot Studio agent stays opt-in
-   (`studioAgent` / `M365_STUDIO_AGENT=1`); `doctor` stays read-only.
+5. **No tenant side effects.** Upstream's Copilot Studio agent is removed; do not bring
+   back anything that creates or changes resources in the tenant. `doctor` stays read-only.
 6. **Opt-in data sharing.** Bing web search stays opt-in (`webSearch` / `M365_WEB_SEARCH=1`);
-   no mailbox-grounded models.
-7. **Tokens never reach logs** — everything written by `log.ts` or the turn log passes `redact()`.
-8. **CI** stays read-only, secret-free, with actions pinned to commit SHAs.
+   no mailbox-grounded models; Work IQ replies are held by default.
+7. **The page never edits OpenCode's config**, and its endpoints keep the monitor's
+   protections (key, `Host`, `Origin`, `Sec-Fetch-Site`, JSON only). `setup`, which the
+   user runs, is the one thing that writes OpenCode's config.
+8. **The sign-in browser stays quiet**: keep `QUIET_BROWSER_ARGS` in `src/login.ts`, and
+   re-measure with `doctor --browser` when Playwright or the browser changes.
+9. **Tokens never reach logs** — everything written by `log.ts` or the turn log passes `redact()`.
+10. **CI** stays read-only, secret-free, with actions pinned to commit SHAs.
 
 ## What this is
 
@@ -60,7 +65,6 @@ do not silently move the logic back.
 | `src/session.ts` | SignalR over WebSocket: framing, the mandatory Metrics frame, ping, stop, Disengaged |
 | `src/auth.ts` | MSAL silent refresh. **Never opens a browser** |
 | `src/login.ts` | The browser sign-in. CLI-only, Playwright is an optional dependency |
-| `src/agent.ts` | Copilot Studio declarative agent (opt-in): discovery, create, publish, hash-versioning |
 | `src/egress.ts` | The outbound allowlist, and MSAL's guarded network client |
 | `src/fenced.ts` | The fenced tool-call contract, both directions, plus the hardening layers |
 | `src/image.ts` | Image input: collect `image_url` parts, upload to M365, build the annotation |
@@ -69,8 +73,12 @@ do not silently move the logic back.
 | `src/config.ts` | Provider config and tool policy — the pure decisions |
 | `src/plugin.ts` | The entry. One default export, `{ id, setup }` — nothing else |
 | `src/plugin-v2.ts` | opencode 2's `setup()`: provider/model transforms and the title hook |
-| `src/runtime.ts` | Resolve options, start the proxy (or use an external one) |
-| `src/cli.ts` | `opencode-m365 login \| setup \| serve \| doctor` |
+| `src/runtime.ts` | Resolve options, start the proxy (or use an external one), and the page if asked |
+| `src/settings.ts` | The saved settings, and which environment variable or plugin option pins each |
+| `src/opencode-config.ts` | Reading OpenCode's config for the page; `setup`'s edit, with a backup |
+| `src/open-url.ts` | Opening the page in the default browser (the only child process) |
+| `src/monitor/` | The page: its loopback server, the turn recorder, Set up's controller, and `ui/` |
+| `src/cli.ts` | `opencode-m365 start \| open \| login \| setup \| serve \| monitor \| doctor` |
 
 ## Testing
 

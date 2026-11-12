@@ -1,6 +1,6 @@
 {
   "name": "@vincent1in/opencode-m365-copilot",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "private": true,
   "description": "Safety-reviewed fork of opencode-m365-copilot: your org's Microsoft 365 Copilot as the model backend for opencode",
   "license": "MIT",
@@ -57,7 +57,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vincent1in/opencode-m365-copilot.git"
+    "url": "git+https://github.com/vincent1in/MS-Copilot-Code.git"
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.0",

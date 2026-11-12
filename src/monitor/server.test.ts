@@ -1,5 +1,7 @@
 import { request as httpRequest } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SettingLockedError, SettingValueError } from "../settings.js";
+import type { AppController } from "./app.js";
 import { createMonitor, type Monitor } from "./monitor.js";
 import { startMonitorServer, type MonitorServerHandle } from "./server.js";
 
@@ -145,5 +147,102 @@ describe("the monitor page's listener", () => {
 
   it("fails clearly when the page's files are missing", async () => {
     await expect(startMonitorServer({ monitor: createMonitor(), assetsDir: new URL("file:///nonexistent-dir/") })).rejects.toThrow(/npm run build/);
+  });
+});
+
+describe("the setup endpoints", () => {
+  function fakeApp() {
+    const listeners = new Set<() => void>();
+    const app = {
+      state: vi.fn(async () => ({ context: "app", account: "alice@contoso.com" })),
+      setSetting: vi.fn(async (key: string, value: unknown) => {
+        if (key === "webSearch") throw new SettingLockedError("webSearch", "the M365_WEB_SEARCH environment variable");
+        if (value === "nonsense") throw new SettingValueError(key, value);
+        return { context: "app", saved: { key, value } };
+      }),
+      signIn: vi.fn(async () => ({ context: "app", signIn: { running: true } })),
+      sendTest: vi.fn(async (model: string) => ({ ok: true, model, reply: "hi" })),
+      onChange: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      notify: () => listeners.forEach((listener) => listener()),
+    };
+    return app;
+  }
+
+  async function startWith(app: ReturnType<typeof fakeApp>) {
+    monitor = createMonitor();
+    handle = await startMonitorServer({ monitor, app: app as unknown as AppController, token: "test-token-0123456789" });
+    return handle;
+  }
+
+  const auth = { Authorization: "Bearer test-token-0123456789" };
+  const postJson = (url: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${url}${path}`, { method: "POST", headers: { ...auth, "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+
+  it("needs the key, like the log", async () => {
+    const { url } = await startWith(fakeApp());
+    expect((await fetch(`${url}/api/state`)).status).toBe(401);
+    const state = await fetch(`${url}/api/state`, { headers: auth });
+    expect(state.status).toBe(200);
+    expect(state.headers.get("content-type")).toMatch(/application\/json/);
+    expect(await state.json()).toMatchObject({ account: "alice@contoso.com" });
+  });
+
+  it("saves a setting, and says plainly when it cannot", async () => {
+    const app = fakeApp();
+    const { url } = await startWith(app);
+    expect((await postJson(url, "/api/settings", { key: "workIq", value: "flag" })).status).toBe(200);
+    expect(app.setSetting).toHaveBeenCalledWith("workIq", "flag");
+    const locked = await postJson(url, "/api/settings", { key: "webSearch", value: true });
+    expect(locked.status).toBe(409);
+    expect(((await locked.json()) as { error: string }).error).toMatch(/M365_WEB_SEARCH/);
+    expect((await postJson(url, "/api/settings", { key: "workIq", value: "nonsense" })).status).toBe(400);
+    expect((await postJson(url, "/api/settings", { value: "flag" })).status).toBe(400);
+  });
+
+  it("accepts only a small JSON body, sent the way the page sends it", async () => {
+    const app = fakeApp();
+    const { url } = await startWith(app);
+    const form = await fetch(`${url}/api/settings`, { method: "POST", headers: { ...auth, "Content-Type": "text/plain" }, body: '{"key":"workIq","value":"flag"}' });
+    expect(form.status).toBe(400);
+    expect((await postJson(url, "/api/settings", { key: "workIq", value: "x".repeat(20_000) })).status).toBe(400);
+    expect((await postJson(url, "/api/settings", [1, 2])).status).toBe(400);
+    expect(app.setSetting).not.toHaveBeenCalled();
+  });
+
+  it("starts sign-in and sends the test message on request", async () => {
+    const app = fakeApp();
+    const { url } = await startWith(app);
+    expect((await postJson(url, "/api/sign-in", {})).status).toBe(202);
+    expect(app.signIn).toHaveBeenCalledTimes(1);
+    const test = await postJson(url, "/api/test", { model: "gpt-6.1-sol" });
+    expect(await test.json()).toEqual({ ok: true, model: "gpt-6.1-sol", reply: "hi" });
+    expect((await postJson(url, "/api/test", { model: 7 })).status).toBe(400);
+  });
+
+  it("refuses the wrong method, other origins, and unknown endpoints", async () => {
+    const { url } = await startWith(fakeApp());
+    expect((await fetch(`${url}/api/sign-in`, { headers: auth })).status).toBe(405);
+    expect((await postJson(url, "/api/state", {})).status).toBe(405);
+    expect((await postJson(url, "/api/connect-opencode", { quiet: true })).status).toBe(404);
+    expect((await postJson(url, "/api/settings", { key: "workIq", value: "flag" }, { Origin: "https://evil.example" })).status).toBe(403);
+  });
+
+  it("tells open pages when the state changed, without sending the state itself", async () => {
+    const app = fakeApp();
+    const { url } = await startWith(app);
+    const pending = raw(url, { path: "/events", headers: auth, readMs: 300 });
+    setTimeout(() => app.notify(), 100);
+    const { body } = await pending;
+    expect(body).toContain('data: {"kind":"app-changed"}');
+    expect(body).not.toContain("alice@contoso.com");
+  });
+
+  it("has no setup endpoints without a backend", async () => {
+    monitor = createMonitor();
+    handle = await startMonitorServer({ monitor, token: "test-token-0123456789" });
+    expect((await fetch(`${handle.url}/api/state`, { headers: auth })).status).toBe(404);
   });
 });

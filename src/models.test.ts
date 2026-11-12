@@ -60,7 +60,7 @@ describe("model catalog", () => {
   });
 
   it("defaults to GPT-6.1 Sol, the best-measured tone for agent-less tool turns", () => {
-    // This fork's Studio agent is opt-in, so tool turns normally run agent-less; see
+    // Upstream's Studio agent is removed from this fork, so tool turns run agent-less; see
     // the comment on DEFAULT_MODEL for the measurements behind this choice.
     expect(DEFAULT_MODEL).toBe("gpt-6.1-sol");
     expect(toneFor(DEFAULT_MODEL)).toBe("Gpt_61_Sol_Reasoning");
@@ -75,7 +75,7 @@ describe("model catalog", () => {
       expect(route.framing).toBe("relay");
       expect(route.sandbox).toContain("bash_tool");
     }
-    expect(toolRouteFor("Gpt_5_5_Chat")).toEqual({ framing: "default", agent: true });
+    expect(toolRouteFor("Gpt_5_5_Chat")).toEqual({ framing: "default" });
   });
 
   it("offers the GPT-5.6 chat tone", () => {
@@ -137,17 +137,17 @@ describe("model picker names", () => {
 });
 
 describe("how each tone is asked to call tools", () => {
-  it("keeps the chat GPT tones on the agent with the default framing", () => {
-    expect(toolRouteFor("Gpt_5_5_Chat")).toEqual({ framing: "default", agent: true });
-    expect(toolRouteFor("magic")).toEqual({ framing: "default", agent: true });
+  it("keeps the chat GPT tones on the default framing", () => {
+    expect(toolRouteFor("Gpt_5_5_Chat")).toEqual({ framing: "default" });
+    expect(toolRouteFor("magic")).toEqual({ framing: "default" });
   });
 
-  it("gives the reasoning tones the relay framing and keeps the agent", () => {
+  it("gives the reasoning tones the relay framing", () => {
     // Agent-less GPT-5.x made no tool calls in the reference project (0/4).
-    expect(toolRouteFor("Gpt_5_5_Reasoning")).toEqual({ framing: "relay", agent: true });
+    expect(toolRouteFor("Gpt_5_5_Reasoning")).toEqual({ framing: "relay" });
   });
 
-  it("leaves Claude on the agent, since an unlicensed account refuses Claude without it", () => {
-    for (const tone of ["Claude_Sonnet", "Claude_Sonnet_Reasoning"]) expect(toolRouteFor(tone)).toEqual({ framing: "default", agent: true });
+  it("leaves Claude on the default framing", () => {
+    for (const tone of ["Claude_Sonnet", "Claude_Sonnet_Reasoning"]) expect(toolRouteFor(tone)).toEqual({ framing: "default" });
   });
 });

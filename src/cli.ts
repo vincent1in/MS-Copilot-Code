@@ -1,45 +1,52 @@
 #!/usr/bin/env node
 /**
- * `opencode-m365` — sign in, wire up opencode, and check the plumbing.
+ * `opencode-m365` — the gateway's command line.
  *
- * The plugin can do everything except sign in, because signing in means opening a
- * browser and a plugin running under a TUI must not do that. This is where that
- * happens, plus the one-time config write.
+ * `start` is the front door: it runs the gateway with its page and opens it, and the
+ * page walks you through signing in, a test message, and connecting OpenCode. The
+ * other commands do the same steps from a terminal, or check the plumbing.
+ *
+ * Signing in opens a browser window, which a plugin running under OpenCode's TUI must
+ * not do; that is why it lives here (and in the app), not in the plugin.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { createTokenClient } from "./auth.js";
-import { getOrCreateAgent } from "./agent.js";
-import { PROVIDER_ID, mergeOpencodeConfig, monitorEnabled, studioAgentEnabled, webSearchEnabled, type PluginPathInfo } from "./config.js";
+import { PROVIDER_ID } from "./config.js";
+import { ALLOWED_HOSTS } from "./egress.js";
 import { checkTones, distinctTones } from "./live-check.js";
 import { DEFAULT_MODEL, LOCAL_TITLE_MODEL, MODELS } from "./models.js";
-import { CopilotSession } from "./session.js";
-import { startServer } from "./server.js";
-import { AGENT_FILE, CACHE_FILE, CONFIG_DIR, SECRETS_FILE } from "./paths.js";
-import { launchMonitor, type LaunchedMonitor } from "./monitor/launch.js";
+import { createAppController } from "./monitor/app.js";
+import { launchPage, type LaunchedPage } from "./monitor/launch.js";
 import { listMonitorLinks } from "./monitor/links.js";
 import { createMonitor } from "./monitor/monitor.js";
-import { workIqPolicy } from "./workiq.js";
+import { openInBrowser } from "./open-url.js";
+import { connectOpenCode, openCodeStatus } from "./opencode-config.js";
+import { CACHE_FILE, CONFIG_DIR, SECRETS_FILE, gatewayCommand } from "./paths.js";
+import { startServer } from "./server.js";
+import { CopilotSession } from "./session.js";
+import { createSettingsStore, type SettingState } from "./settings.js";
 
-const OPENCODE_CONFIG = join(homedir(), ".config", "opencode", "opencode.json");
+const DEFAULT_PORT = 4141;
 
 async function main(): Promise<void> {
   const [command = "help", ...rest] = process.argv.slice(2);
 
   switch (command) {
+    case "start":
+      return doStart(rest);
+    case "open":
+      return doOpen();
     case "login":
-      return doLogin(rest);
+      return doLogin();
     case "setup":
       return doSetup(rest);
     case "serve":
       return doServe(rest);
-    case "doctor":
-      return doDoctor(rest);
     case "monitor":
       return doMonitor();
+    case "doctor":
+      return doDoctor(rest);
     case "help":
     case "--help":
     case "-h":
@@ -52,162 +59,161 @@ async function main(): Promise<void> {
 }
 
 function printHelp(): void {
-  console.log(`opencode-m365 — use Microsoft 365 Copilot as opencode's model backend
+  console.log(`opencode-m365 — use your work account's Microsoft Copilot as OpenCode's model
 
-  login                   Sign in to Microsoft 365 in a browser window (SSO/MFA by
-                          hand, once) and store the token cache
-  setup                   Point ~/.config/opencode/opencode.json at this checkout's
-                          build (never at an npm package name)
+  start [--port <n>] [--no-open]
+                  Start the gateway and open its page, which walks you through
+                  signing in, a test message and connecting OpenCode (port ${DEFAULT_PORT})
+  open            Open the page of a gateway that is already running
+  login           Sign in to Microsoft 365 in a browser window (SSO/MFA by hand)
+  setup [--quiet] Add this folder to OpenCode's config for you (the page shows how
+                  to do it by hand); --quiet also turns off OpenCode's own update
+                  checks, session sharing and web search
   serve [--port <n>] [--monitor]
-                          Run the OpenAI-compatible proxy standalone
-                          (key from M365_PROXY_KEY, else printed); --monitor
-                          also opens the gateway monitor and prints its link
-  monitor                 Print the link to the gateway monitor of each gateway
-                          running with it on (plugin: { "monitor": true } or
-                          M365_MONITOR=1)
-  doctor [--live]         Check auth, the proxy and opencode wiring (read-only:
-                          never provisions the Copilot Studio agent)
-                          (--live also sends one short message per model tone)
+                  Run only the OpenAI-compatible proxy, for scripts
+                  (key from M365_PROXY_KEY, else printed); --monitor adds the page
+  monitor         Print the page link of every running gateway
+  doctor [--live] [--browser [--seconds <n>]]
+                  Check sign-in, the proxy and OpenCode (read-only). --live also
+                  sends one short message per model; --browser opens the sign-in
+                  browser on an empty page for a minute and lists what it tries to
+                  contact by itself (refused, not sent)
 
-Config lives in ${CONFIG_DIR}
-
-Sign-in is interactive only. Use a browser you already have with
-M365_BROWSER_CHANNEL=msedge (or chrome), or CHROMIUM_PATH=/path/to/browser.
-
-Replies Copilot draws from your work data (Work IQ) are held by default;
-M365_WORK_IQ=flag or allow changes that.`);
+Your settings and sign-in live in ${CONFIG_DIR} (readable only by you).
+The gateway contacts exactly two addresses: ${ALLOWED_HOSTS.auth} (sign-in)
+and ${ALLOWED_HOSTS.chat} (Copilot). Nothing else, and no analytics.`);
 }
 
-async function doLogin(args: string[]): Promise<void> {
+async function doStart(args: string[]): Promise<void> {
+  const port = portFrom(args) ?? DEFAULT_PORT;
+  const settings = createSettingsStore();
+  const tokens = createTokenClient();
+  const monitor = createMonitor();
+  const fixedKey = process.env.M365_PROXY_KEY || undefined;
+
+  let proxy: Awaited<ReturnType<typeof startServer>>;
+  try {
+    proxy = await startServer({
+      getToken: () => tokens.getToken(),
+      settings: () => settings.current(),
+      monitor,
+      port,
+      ...(fixedKey ? { apiKey: fixedKey } : {}),
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "EADDRINUSE") throw error;
+    const running = listMonitorLinks().find((entry) => new URL(entry.proxy).port === String(port));
+    if (running) {
+      console.log(`The gateway is already running (process ${running.pid}). Its page:\n  ${running.link}`);
+      if (!args.includes("--no-open")) openInBrowser(running.link);
+      return;
+    }
+    console.error(`Port ${port} is in use by another program. Start on another one: ${gatewayCommand(`start --port ${port + 1}`)}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const facts = { context: "app" as const, proxy: proxy.url, pid: process.pid, defaultModel: DEFAULT_MODEL, startedAt: new Date().toISOString() };
+  const app = createAppController({
+    context: "app",
+    facts,
+    tokens,
+    settings,
+    proxy: { url: proxy.url, apiKey: proxy.apiKey },
+    signIn: async (browser) => {
+      // Imported here so the browser automation only loads when someone signs in.
+      const { login } = await import("./login.js");
+      return login({ browser });
+    },
+  });
+  const page = await launchPage({ monitor, facts, app, open: !args.includes("--no-open") });
+
+  console.log("The gateway is running.");
+  console.log(`\n  ${page.opened ? "Its page should open in your browser. If it does not, open" : "Open"} this link:`);
+  console.log(`  ${page.link}`);
+  console.log("\n  The link is the key to the page: don't share it.");
+  console.log("  Ctrl+C stops the gateway. OpenCode runs its own copy of the gateway, so it");
+  console.log("  does not need this window once you are set up.");
+  stopOnSignal([page, proxy]);
+}
+
+function doOpen(): void {
+  const [newest] = listMonitorLinks();
+  if (!newest) {
+    console.log("No gateway with a page is running.");
+    console.log(`Start one with ${gatewayCommand("start")}, or choose to start it under "When OpenCode starts" in its Settings.`);
+    return;
+  }
+  console.log(`Opening the page of gateway ${newest.pid}:\n  ${newest.link}`);
+  openInBrowser(newest.link);
+}
+
+async function doLogin(): Promise<void> {
   // Imported here so the heavy browser dependency never loads for other commands.
   const { login } = await import("./login.js");
-  // Always interactive in this fork; `--interactive` is accepted and ignored so old
-  // instructions keep working.
-  void args;
-
   try {
-    const account = await login({ onStatus: (message) => console.log(`  ${message}`) });
+    const account = await login({
+      browser: createSettingsStore().current().signInBrowser,
+      onStatus: (message) => console.log(`  ${message}`),
+    });
     console.log(`\nSigned in as ${account}.`);
     console.log(`Token cache written to ${CACHE_FILE}`);
-    console.log("\nNext: opencode-m365 setup");
+    console.log(`\nNext: ${gatewayCommand("start")} opens the page, where you send a test message and connect OpenCode.`);
   } catch (error) {
     console.error(`\nSign-in failed: ${(error as Error).message}`);
     process.exitCode = 1;
   }
 }
 
-async function doSetup(args: string[]): Promise<void> {
-  // Always this checkout's build, referenced by its directory (opencode 2 refuses a
-  // file path). Upstream defaulted to the npm name, which makes opencode install the
-  // published upstream package — code nobody here reviewed — on its next start. This
-  // fork is private and never published, so a name could only ever resolve to
-  // someone else's package. `--local` is accepted and ignored. `pluginRef` is how
-  // older versions referenced us under opencode 1's key, so that entry can be found
-  // and removed; see `mergeOpencodeConfig`, which also replaces an upstream npm entry.
-  void args;
-  const dist = dirname(fileURLToPath(import.meta.url));
-  const pluginRef = resolve(dist, "plugin.mjs");
-  const pluginDir = resolve(dist, "..");
-
-  if (!existsSync(pluginRef)) {
-    console.error(`No build at ${pluginRef}. Run \`npm run build\` first.`);
+function doSetup(args: string[]): void {
+  // Always this checkout, referenced by its directory (opencode 2 refuses a file path).
+  // Upstream defaulted to the npm name, which makes opencode install the published
+  // upstream package — code nobody here reviewed — on its next start. `--local` is
+  // accepted and ignored.
+  try {
+    const quiet = args.includes("--quiet");
+    const result = connectOpenCode({ quiet });
+    console.log(`Connected: OpenCode now loads the gateway from this folder (${result.configPath}).`);
+    if (result.removedLegacyEntry) console.log("(Removed this plugin's old opencode 1 entry: opencode 1 is no longer supported.)");
+    if (result.backupPath) console.log(`(Your previous config is saved as ${result.backupPath}.)`);
+    if (quiet) console.log("OpenCode's own update checks, session sharing and web search are off.");
+    console.log("\nStart OpenCode in your project with `opencode`. Models from the gateway are");
+    console.log(`listed as ${PROVIDER_ID}/<model>, and ${PROVIDER_ID}/${DEFAULT_MODEL} is used when you pick none.`);
+  } catch (error) {
+    console.error((error as Error).message);
     process.exitCode = 1;
-    return;
   }
-
-  let existing: Record<string, any> = {};
-  if (existsSync(OPENCODE_CONFIG)) {
-    try {
-      existing = JSON.parse(readFileSync(OPENCODE_CONFIG, "utf8"));
-    } catch (error) {
-      console.error(`${OPENCODE_CONFIG} is not valid JSON — fix or move it first.\n  ${String(error)}`);
-      process.exitCode = 1;
-      return;
-    }
-  }
-
-  const merged = mergeOpencodeConfig(existing, { pluginRef, pluginDir, inspect: inspectPluginPath });
-  mkdirSync(dirname(OPENCODE_CONFIG), { recursive: true });
-  // It is the user's file, not ours: keep what was there before we rewrite it.
-  const backup = `${OPENCODE_CONFIG}.bak`;
-  const hadConfig = existsSync(OPENCODE_CONFIG);
-  if (hadConfig) copyFileSync(OPENCODE_CONFIG, backup);
-  writeFileSync(OPENCODE_CONFIG, `${JSON.stringify(merged, null, 2)}\n`);
-
-  console.log(`Added ${pluginDir} to ${OPENCODE_CONFIG}`);
-  if (existing.plugin !== undefined && JSON.stringify(existing.plugin) !== JSON.stringify(merged.plugin)) {
-    console.log(`(removed this plugin's opencode 1 entry: opencode 1 is no longer supported)`);
-  }
-  if (hadConfig) console.log(`(previous version saved as ${backup})`);
-  console.log(`\nThe plugin registers the provider itself on startup, so there is nothing`);
-  console.log(`else to configure. Models appear as ${PROVIDER_ID}/<model>, defaulting to`);
-  console.log(`${PROVIDER_ID}/${DEFAULT_MODEL}.`);
-  console.log(`\nNote: it also trims opencode's toolset when an ${PROVIDER_ID} model is`);
-  console.log(`selected. M365 refuses to engage with a full coding-agent toolset — see the`);
-  console.log(`README. Pass { "lean": false } in the plugin options to opt out.`);
-  console.log(`\nCheck it with: opencode models | grep ${PROVIDER_ID}`);
-}
-
-/** Which package owns a local plugin path: its own dir or the one above (`dist/`). */
-function inspectPluginPath(path: string): PluginPathInfo {
-  if (!existsSync(path)) return { exists: false };
-  const start = path.endsWith(".mjs") || path.endsWith(".js") ? dirname(path) : path;
-  for (const dir of [start, dirname(start)]) {
-    try {
-      const name = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"))?.name;
-      if (typeof name === "string") return { exists: true, packageName: name };
-    } catch {
-      /* no package.json here; try one level up */
-    }
-  }
-  return { exists: true };
 }
 
 async function doServe(args: string[]): Promise<void> {
-  const portIndex = args.indexOf("--port");
-  const port = portIndex >= 0 ? Number(args[portIndex + 1]) : 4141;
+  const port = portFrom(args) ?? DEFAULT_PORT;
+  const settings = createSettingsStore();
   const tokens = createTokenClient();
-
-  // A fixed key lets a long-lived opencode config keep working across restarts;
+  // A fixed key lets a long-lived client config keep working across restarts;
   // otherwise every launch mints a fresh one.
   const fixedKey = process.env.M365_PROXY_KEY || undefined;
-
-  const useStudioAgent = studioAgentEnabled();
-  const webSearch = webSearchEnabled();
-  const workIq = workIqPolicy();
-  const monitor = args.includes("--monitor") || monitorEnabled() ? createMonitor() : undefined;
+  const monitor = args.includes("--monitor") ? createMonitor() : undefined;
   const proxy = await startServer({
     getToken: () => tokens.getToken(),
-    // Opt-in only (M365_STUDIO_AGENT=1): provisioning creates a bot in the tenant.
-    ...(useStudioAgent
-      ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
-      : {}),
-    webSearch,
-    workIq,
+    settings: () => settings.current(),
     ...(monitor ? { monitor } : {}),
     port,
     ...(fixedKey ? { apiKey: fixedKey } : {}),
   });
-  let launched: LaunchedMonitor | undefined;
+  let page: LaunchedPage | undefined;
   if (monitor) {
-    launched = await launchMonitor(monitor, {
-      proxy: proxy.url,
-      defaultModel: DEFAULT_MODEL,
-      webSearch,
-      studioAgent: useStudioAgent,
-      lean: true,
-      workIq,
-    });
+    const facts = { context: "app" as const, proxy: proxy.url, pid: process.pid, defaultModel: DEFAULT_MODEL, startedAt: new Date().toISOString() };
+    const app = createAppController({ context: "app", facts, tokens, settings, proxy: { url: proxy.url, apiKey: proxy.apiKey } });
+    page = await launchPage({ monitor, facts, app });
   }
 
+  const current = settings.current();
   console.log(`M365 Copilot proxy listening on ${proxy.url}`);
   console.log(`  models:      ${proxy.url}/v1/models`);
   console.log(`  completions: ${proxy.url}/v1/chat/completions`);
-  console.log(`  studio agent: ${useStudioAgent ? "enabled (M365_STUDIO_AGENT=1)" : "disabled — nothing is created in your tenant"}`);
-  console.log(`  web search:   ${webSearch ? "enabled (M365_WEB_SEARCH=1)" : "disabled — Copilot is not offered Bing on coding turns"}`);
-  console.log(`  work data:    ${describeWorkIq(workIq)}`);
-  console.log(`  monitor:      ${launched ? launched.link : "off — add --monitor (or M365_MONITOR=1) to see every turn"}`);
-  if (launched) console.log("                (this link is the key to the page; it lives in memory and stops with the proxy)");
+  console.log(`  web search:  ${current.webSearch ? "on" : "off — Copilot is not offered Bing on coding turns"}`);
+  console.log(`  work data:   ${describeWorkIq(current.workIq)}`);
+  console.log(`  page:        ${page ? page.link : "off — add --monitor to see every turn"}`);
   console.log("\nLoopback-only. Every request must send `Authorization: Bearer <key>`;");
   console.log("browser origins and CORS are refused.");
   if (fixedKey) {
@@ -216,34 +222,27 @@ async function doServe(args: string[]): Promise<void> {
     console.log(`  key:         ${proxy.apiKey}`);
     console.log("               (new every launch — set M365_PROXY_KEY to keep one)");
   }
-  console.log(`\nPoint the plugin here with { "baseUrl": "${proxy.url}/v1", "apiKey": "<key>" },`);
-  console.log("or leave apiKey out and export the same M365_PROXY_KEY to opencode.");
   console.log("Ctrl+C to stop.");
-
-  process.on("SIGINT", () => {
-    void Promise.all([launched?.close(), proxy.close()]).then(() => process.exit(0));
-  });
+  stopOnSignal([page, proxy]);
 }
 
 function describeWorkIq(policy: string): string {
-  if (policy === "hold") return "held — a reply Copilot drew from your email, files or chats never reaches opencode (M365_WORK_IQ)";
-  if (policy === "flag") return "flagged — such replies pass through and are marked in the monitor (M365_WORK_IQ=flag)";
-  return "allowed — such replies pass through (M365_WORK_IQ=allow)";
+  if (policy === "hold") return "held — a reply Copilot drew from your email, files or chats never reaches the client";
+  if (policy === "flag") return "flagged — such replies pass through and are marked on the page";
+  return "allowed — such replies pass through";
 }
 
 function doMonitor(): void {
   const links = listMonitorLinks();
   if (links.length === 0) {
-    console.log("No gateway is running with the monitor on.");
-    console.log('Turn it on with { "monitor": true } in the plugin options or M365_MONITOR=1 before');
-    console.log("starting opencode, or run `opencode-m365 serve --monitor`.");
+    console.log(`No gateway with a page is running. Start one with ${gatewayCommand("start")}.`);
     return;
   }
   for (const entry of links) {
     console.log(`Gateway ${entry.pid}, started ${new Date(entry.startedAt).toLocaleString()} (proxy ${entry.proxy}):`);
     console.log(`  ${entry.link}`);
   }
-  console.log("\nOpen the link in a browser on this machine. It carries the page's key, so don't share it.");
+  console.log("\nOpen a link in a browser on this machine. It carries the page's key, so don't share it.");
 }
 
 async function doDoctor(args: string[]): Promise<void> {
@@ -254,8 +253,10 @@ async function doDoctor(args: string[]): Promise<void> {
   };
 
   console.log("Config");
-  check("config directory", existsSync(CONFIG_DIR), CONFIG_DIR);
-  check("token cache", existsSync(CACHE_FILE), existsSync(CACHE_FILE) ? CACHE_FILE : "run `opencode-m365 login`");
+  // Missing on a first run, which is fine: signing in creates it.
+  const haveConfig = existsSync(CONFIG_DIR);
+  console.log(`  ${haveConfig ? "ok  " : "..  "}  config directory — ${CONFIG_DIR}${haveConfig ? "" : " (not created yet; signing in creates it)"}`);
+  check("token cache", existsSync(CACHE_FILE), existsSync(CACHE_FILE) ? CACHE_FILE : `not signed in: run ${gatewayCommand("start")}`);
   if (existsSync(SECRETS_FILE)) {
     // Left over from upstream's automated sign-in. This fork never reads it, but it
     // still holds a password and a TOTP seed in plain text.
@@ -273,32 +274,21 @@ async function doDoctor(args: string[]): Promise<void> {
     check("chat token", false, (error as Error).message);
   }
 
-  // Read-only: doctor reports on the agent but never provisions one. Creating a bot
-  // in the tenant is not something a health check should do.
-  console.log("\nCopilot Studio agent (opt-in)");
-  if (!studioAgentEnabled()) {
-    console.log('  ..    disabled — nothing is created in your tenant. Enable with { "studioAgent": true } or M365_STUDIO_AGENT=1');
-  } else {
-    console.log("  ..    enabled — provisioned lazily on the first tool turn");
-  }
-  console.log(`  ..    cache — ${existsSync(AGENT_FILE) ? AGENT_FILE : "none"}`);
-
   console.log("\nPrivacy");
-  console.log(`  ..    work data (Work IQ) — ${describeWorkIq(workIqPolicy())}`);
-  console.log(
-    `  ..    gateway monitor — ${monitorEnabled() ? "on (M365_MONITOR=1); `opencode-m365 monitor` prints its link" : 'off. Turn on with { "monitor": true } or M365_MONITOR=1'}`,
-  );
+  const settings = createSettingsStore();
+  const described = settings.describe();
+  console.log(`  ..    work data (Work IQ) — ${describeWorkIq(described.workIq.value)}${sourceNote(described.workIq)}`);
+  console.log(`  ..    Bing web search — ${described.webSearch.value ? "on" : "off"}${sourceNote(described.webSearch)}`);
+  console.log(`  ..    allowed addresses — ${ALLOWED_HOSTS.auth} (sign-in), ${ALLOWED_HOSTS.chat} (Copilot)`);
 
   console.log("\nProxy");
   try {
-    const proxy = await startServer({ getToken: () => tokens.getToken(), port: 0 });
+    const proxy = await startServer({ getToken: () => tokens.getToken(), settings: () => settings.current(), port: 0 });
     const response = await fetch(`${proxy.url}/health`);
     check("starts and serves /health", response.ok, proxy.url);
     const refused = await fetch(`${proxy.url}/v1/models`);
     check("refuses a request without the secret", refused.status === 401);
-    const models: any = await (
-      await fetch(`${proxy.url}/v1/models`, { headers: { Authorization: `Bearer ${proxy.apiKey}` } })
-    ).json();
+    const models: any = await (await fetch(`${proxy.url}/v1/models`, { headers: { Authorization: `Bearer ${proxy.apiKey}` } })).json();
     check("advertises models", models.data?.length > 0, `${models.data?.length ?? 0} models`);
     check("local titler present", models.data?.some((m: any) => m.id === LOCAL_TITLE_MODEL));
     await proxy.close();
@@ -318,11 +308,60 @@ async function doDoctor(args: string[]): Promise<void> {
     }
   }
 
-  console.log("\nopencode");
-  const configured = existsSync(OPENCODE_CONFIG) && readFileSync(OPENCODE_CONFIG, "utf8").includes("m365");
-  check("plugin registered", configured, configured ? OPENCODE_CONFIG : "run `opencode-m365 setup`");
+  console.log("\nOpenCode");
+  const status = openCodeStatus();
+  if (status.problem) check("config readable", false, `${status.configPath} is ${status.problem}`);
+  check("gateway connected", status.connected, status.connected ? status.configPath : `see the Set up page, or run ${gatewayCommand("setup --quiet")}`);
+
+  if (args.includes("--browser")) {
+    const seconds = secondsFrom(args) ?? 60;
+    console.log(`\nSign-in browser, on an empty page for ${seconds} s (what it tries to reach is refused, not sent)`);
+    try {
+      const { browserTraffic } = await import("./login.js");
+      const traffic = await browserTraffic({ browser: settings.current().signInBrowser, seconds });
+      if (traffic.hosts.size === 0) {
+        check(traffic.browser, true, "tried to contact nothing by itself");
+      } else {
+        console.log(`  ..    ${traffic.browser} tried to contact:`);
+        for (const [host, count] of [...traffic.hosts].sort()) {
+          const how = traffic.direct.has(host) ? "went around this check: a policy gives the browser its own proxy" : "refused";
+          console.log(`          ${host} (${count}×, ${how})`);
+        }
+      }
+    } catch (error) {
+      check("opens the sign-in browser", false, (error as Error).message.split("\n")[0]);
+    }
+  }
 
   process.exitCode = failures > 0 ? 1 : 0;
+}
+
+function sourceNote(state: SettingState): string {
+  return state.lockedBy ? ` (set by ${state.lockedBy})` : state.source === "saved" ? " (saved setting)" : "";
+}
+
+function secondsFrom(args: string[]): number | undefined {
+  const index = args.indexOf("--seconds");
+  if (index < 0) return undefined;
+  const seconds = Number(args[index + 1]);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 600) throw new Error(`--seconds needs a number from 1 to 600, not ${args[index + 1] ?? "nothing"}`);
+  return seconds;
+}
+
+function portFrom(args: string[]): number | undefined {
+  const index = args.indexOf("--port");
+  if (index < 0) return undefined;
+  const port = Number(args[index + 1]);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`--port needs a number from 0 to 65535, not ${args[index + 1] ?? "nothing"}`);
+  return port;
+}
+
+function stopOnSignal(handles: ({ close(): Promise<void> } | undefined)[]): void {
+  const stop = () => {
+    void Promise.all(handles.map((handle) => handle?.close())).then(() => process.exit(0));
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
 }
 
 main().catch((error) => {

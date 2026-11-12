@@ -5,34 +5,44 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
     <meta name="color-scheme" content="light dark" />
-    <title>Gateway monitor</title>
+    <title>Microsoft Copilot gateway</title>
     <link rel="stylesheet" href="/monitor.css" />
     <script type="module" src="/monitor.js"></script>
   </head>
   <body>
     <header class="masthead">
       <div class="masthead-top">
-        <h1>Gateway monitor</h1>
+        <h1>Microsoft Copilot gateway</h1>
         <p class="link-state" id="link-state" role="status" aria-live="polite">Connecting…</p>
-        <div class="controls">
-          <label class="follow"><input type="checkbox" id="follow" checked /> Follow new turns</label>
-          <button type="button" id="pause" aria-pressed="false">Pause</button>
-          <button type="button" id="clear">Clear</button>
-        </div>
+        <p class="who" id="who"></p>
       </div>
-      <dl class="facts" id="facts" aria-label="Gateway settings"></dl>
     </header>
 
     <nav class="views" aria-label="Views">
-      <button type="button" class="view" id="view-turns" aria-current="page">Turns</button>
+      <button type="button" class="view" id="view-setup" hidden>Set up</button>
+      <button type="button" class="view" id="view-turns" aria-current="page">Traffic</button>
       <button type="button" class="view" id="view-checks">Checks</button>
+      <button type="button" class="view" id="view-settings" hidden>Settings</button>
     </nav>
 
     <main id="main">
-      <section class="turns-view" id="turns-view" aria-label="Turns">
-        <ol class="turn-list" id="turn-list" aria-label="Turns, oldest first" tabindex="0"></ol>
-        <article class="turn" id="turn" aria-live="off"></article>
+      <section class="page setup-view" id="setup-view" aria-label="Set up" hidden></section>
+
+      <section class="turns-view" id="turns-view" aria-label="Traffic">
+        <div class="traffic-bar">
+          <p class="traffic-note">Each request, what went to Microsoft, and what came back. Newest at the bottom.</p>
+          <div class="controls">
+            <label class="follow"><input type="checkbox" id="follow" checked /> Follow new turns</label>
+            <button type="button" id="pause" aria-pressed="false">Pause</button>
+            <button type="button" id="clear">Clear</button>
+          </div>
+        </div>
+        <div class="turns-split">
+          <ol class="turn-list" id="turn-list" aria-label="Turns, oldest first" tabindex="0"></ol>
+          <article class="turn" id="turn" aria-live="off"></article>
+        </div>
       </section>
+
       <section class="checks-view" id="checks-view" aria-label="All checks" hidden>
         <table class="check-table">
           <caption>Every check the gateway ran, newest first</caption>
@@ -42,12 +52,14 @@
           <tbody id="check-rows"></tbody>
         </table>
       </section>
+
+      <section class="page settings-view" id="settings-view" aria-label="Settings" hidden></section>
     </main>
 
     <footer class="colophon">
       <p>
-        Kept in memory only. The gateway and this page hold these records until you press Clear or the gateway
-        stops; nothing is written to disk.
+        Traffic and Checks are kept in memory only, until you press Clear or the gateway stops. Nothing from them is
+        written to disk.
       </p>
       <p>
         Everything on the Microsoft 365 side has reached Microsoft. Your organization's Copilot audit log records

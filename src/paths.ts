@@ -1,5 +1,21 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * This gateway's folder, the one OpenCode loads as a plugin. Modules are bundled into
+ * `dist/*.mjs`, or run from `src/` in tests: either way it is one directory up.
+ */
+export const GATEWAY_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * One of the gateway's commands, written so it runs from any directory:
+ * `node "<folder>/dist/cli.mjs" <args>`. Nothing puts an `opencode-m365` command on
+ * the PATH, so messages give this form.
+ */
+export function gatewayCommand(args: string, dir: string = GATEWAY_DIR): string {
+  return `node "${join(dir, "dist", "cli.mjs")}" ${args}`;
+}
 
 /**
  * Where we keep auth state.
@@ -16,5 +32,4 @@ export const CACHE_FILE = process.env.M365_CACHE_FILE || join(CONFIG_DIR, "msal-
  * kept only so `doctor` can warn that a leftover copy should be deleted.
  */
 export const SECRETS_FILE = process.env.M365_SECRETS_FILE || join(CONFIG_DIR, "secrets.json");
-export const AGENT_FILE = process.env.M365_AGENT_FILE || join(CONFIG_DIR, "agent-id.json");
 export const LOG_FILE = join(CONFIG_DIR, "debug.log");
