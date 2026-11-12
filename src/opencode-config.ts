@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mergeOpencodeConfig, type PluginPathInfo } from "./config.js";
+import { GATEWAY_DIR } from "./paths.js";
 
 export const OPENCODE_CONFIG = process.env.M365_OPENCODE_CONFIG || join(homedir(), ".config", "opencode", "opencode.json");
 
@@ -28,11 +29,7 @@ export const OPENCODE_QUIET: Readonly<Record<"update" | "share" | "websearch", u
 
 /** This checkout: the directory OpenCode loads, and its built entry. */
 export function thisCheckout(): { pluginDir: string; pluginRef: string } {
-  // This module is bundled into dist/*.mjs, or run from src/ in tests: either way the
-  // checkout is one directory up.
-  const here = dirname(fileURLToPath(import.meta.url));
-  const pluginDir = resolve(here, "..");
-  return { pluginDir, pluginRef: resolve(pluginDir, "dist", "plugin.mjs") };
+  return { pluginDir: GATEWAY_DIR, pluginRef: resolve(GATEWAY_DIR, "dist", "plugin.mjs") };
 }
 
 export interface OpenCodeStatus {

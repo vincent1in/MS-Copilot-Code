@@ -953,7 +953,7 @@ describe("failures the client has to be able to tell apart", () => {
     const response = await post(url, { messages: [{ role: "user", content: "hi" }] });
     expect(response.status).toBe(401);
     const body: any = await response.json();
-    expect(body.error.message).toMatch(/opencode-m365 login/);
+    expect(body.error.message).toMatch(/dist[\\/]cli\.mjs" start/);
   });
 
   it("rejects a malformed request with 400", async () => {

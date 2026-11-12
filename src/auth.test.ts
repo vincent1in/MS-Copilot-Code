@@ -114,7 +114,7 @@ describe("acquiring a token", () => {
 
   it("tells the user which command fixes it", async () => {
     const client = createTokenClient({ app: fakeApp({ accounts: [] }) as any });
-    await expect(client.getToken()).rejects.toThrow(/opencode-m365 login/);
+    await expect(client.getToken()).rejects.toThrow(/dist[\\/]cli\.mjs" start/);
   });
 
   it("caches a live token instead of hitting MSAL on every turn", async () => {

@@ -15,7 +15,7 @@
 
 import { readFileSync } from "node:fs";
 import type { ICachePlugin, TokenCacheContext } from "@azure/msal-node";
-import { CACHE_FILE } from "./paths.js";
+import { CACHE_FILE, gatewayCommand } from "./paths.js";
 import { createGuardedNetworkClient } from "./egress.js";
 import { createLogger } from "./log.js";
 import { writePrivateFile } from "./private-fs.js";
@@ -40,7 +40,7 @@ const EXPIRY_MARGIN_MS = 120_000;
 export class AuthRequiredError extends Error {
   readonly authRequired = true;
   constructor(reason: string) {
-    super(`${reason}. Run \`opencode-m365 login\` to sign in.`);
+    super(`${reason}. To sign in, run ${gatewayCommand("start")} and use the page it opens.`);
     this.name = "AuthRequiredError";
   }
 }

@@ -16,6 +16,7 @@ import type { TokenClient } from "../auth.js";
 import { ALLOWED_HOSTS } from "../egress.js";
 import { DEFAULT_MODEL, MODELS } from "../models.js";
 import { OPENCODE_QUIET, openCodeStatus, thisCheckout, type OpenCodeStatus } from "../opencode-config.js";
+import { gatewayCommand } from "../paths.js";
 import { SESSION_ID_HEADER } from "../server.js";
 import type { DescribedSettings, SettingsStore, SignInBrowser } from "../settings.js";
 import type { GatewayFacts } from "./events.js";
@@ -64,6 +65,8 @@ export interface AppState {
     /** The settings that switch off OpenCode's own outside traffic, to copy. */
     quietSettings: Record<string, unknown>;
   };
+  /** The gateway's commands, written to run from any folder. */
+  commands: { login: string; open: string; setup: string };
   settings: DescribedSettings;
   settingsFile: string;
   models: { id: string; name: string }[];
@@ -114,7 +117,11 @@ export function createAppController(options: AppControllerOptions): AppControlle
   };
   options.settings.onChange(notify);
 
-  const command = `node "${pluginDir}/dist/cli.mjs" login`;
+  const commands = {
+    login: gatewayCommand("login", pluginDir),
+    open: gatewayCommand("open", pluginDir),
+    setup: gatewayCommand("setup --quiet", pluginDir),
+  };
 
   const state = async (): Promise<AppState> => {
     let account: string | null = null;
@@ -127,7 +134,8 @@ export function createAppController(options: AppControllerOptions): AppControlle
       context: options.context,
       facts: options.facts,
       account,
-      signIn: { available: Boolean(options.signIn), running: signingIn, ...(signInError ? { error: signInError } : {}), command },
+      signIn: { available: Boolean(options.signIn), running: signingIn, ...(signInError ? { error: signInError } : {}), command: commands.login },
+      commands,
       test: { running: testing, prompt: TEST_PROMPT, ...(lastTest ? { last: lastTest } : {}) },
       opencode: { ...openCodeStatus(pluginDir, options.opencodeConfigPath), pluginDir, quietSettings: { ...OPENCODE_QUIET } },
       settings: options.settings.describe(),
@@ -145,7 +153,7 @@ export function createAppController(options: AppControllerOptions): AppControlle
       return state();
     },
     async signIn() {
-      if (!options.signIn) throw new Error(`Sign in from a terminal instead: ${command}`);
+      if (!options.signIn) throw new Error(`Sign in from a terminal instead: ${commands.login}`);
       if (!signingIn) {
         signingIn = true;
         signInError = undefined;

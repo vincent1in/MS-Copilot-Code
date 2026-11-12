@@ -356,7 +356,7 @@ const SETTING_GROUPS = [
         applies: "next start",
         options: [
           ["off", "Don't start this page"],
-          ["on", "Start it (open it with opencode-m365 open)"],
+          ["on", "Start it, without opening it"],
           ["open", "Start it and open it in the browser"],
         ],
       },
@@ -443,7 +443,7 @@ function boot() {
 
   const token = takeToken();
   if (!token) {
-    setLinkState("refused", "This page needs its key. Open it from the link that `opencode-m365 start` or `opencode-m365 open` gives you.");
+    setLinkState("refused", "This page needs its key. Open it with the link the gateway printed when it started.");
     render();
     return;
   }
@@ -499,7 +499,7 @@ function boot() {
         const response = await fetch("/events", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
         if (response.status === 401) {
           forgetToken();
-          setLinkState("refused", "This link's key is out of date: the key changes every time the gateway starts. Run `opencode-m365 open` for the current link.");
+          setLinkState("refused", "This link's key is out of date: it changes every time the gateway starts. Open the page with the link the gateway printed this time.");
           return;
         }
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
@@ -927,7 +927,8 @@ function boot() {
       overridden.length
         ? h("p", { class: "setting-note locked" }, `OpenCode's config also sets ${overridden.join(", ")} for the gateway. Inside OpenCode those win over this page's Settings.`)
         : null,
-      h("p", { class: "setting-note" }, "Rather run a command? ", h("code", null, "opencode-m365 setup --quiet"), " makes the same change and saves a backup of your config. This page never edits it."),
+      h("p", { class: "setting-note" }, "Rather run a command? This one makes the same change and saves a backup of your config. This page never edits it."),
+      snippet("setup-command", s.commands.setup),
     );
   }
 
@@ -943,7 +944,8 @@ function boot() {
         : status(on, setting.value === "open" ? "This page opens when OpenCode starts." : on ? "This page starts with OpenCode." : "Off."),
       inside ? null : h("p", null, "OpenCode runs its own copy of the gateway, so its turns show on that copy's page, not this one. Choose what happens when OpenCode starts:"),
       inside ? null : choiceControl(SETTING_GROUPS[2].items[0], setting, "watch"),
-      inside ? null : h("p", { class: "setting-note" }, "If the page doesn't open by itself, run ", h("code", null, "opencode-m365 open"), "."),
+      inside ? null : h("p", { class: "setting-note" }, "To open the page later, run:"),
+      inside ? null : snippet("open-command", s.commands.open),
     );
   }
 

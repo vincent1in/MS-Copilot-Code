@@ -17,6 +17,7 @@ import { createMonitor } from "./monitor/monitor.js";
 import { DEFAULT_MODEL } from "./models.js";
 import { startServer } from "./server.js";
 import { createSettingsStore, type SettingsStore } from "./settings.js";
+import { gatewayCommand } from "./paths.js";
 
 const log = createLogger("plugin");
 
@@ -55,7 +56,7 @@ export async function startRuntime(rawOptions?: Record<string, unknown>, deps: {
       // Not a throw: a plugin that throws during load takes opencode's whole config
       // with it. The proxy will answer 401 with the same advice.
       log.warn(
-        "baseUrl is set but no proxy secret is: pass the key `opencode-m365 serve` printed as the `apiKey` plugin option, or set M365_PROXY_KEY",
+        `baseUrl is set but no proxy secret is: pass the key ${gatewayCommand("serve")} printed as the \`apiKey\` plugin option, or set M365_PROXY_KEY`,
       );
     }
     return { baseUrl: options.baseUrl, apiKey: apiKey ?? "missing-proxy-secret", options, settings, close: async () => {} };
@@ -83,7 +84,7 @@ export async function startRuntime(rawOptions?: Record<string, unknown>, deps: {
       page = await launchPage({ monitor, facts, app, open: initial.pageWithOpenCode === "open" });
       // The link carries the page's key, so it is not logged: `opencode-m365 open`
       // reads it from an owner-only file instead.
-      log.info("the gateway page is on; run `opencode-m365 open` to see it");
+      log.info(`the gateway page is on; run ${gatewayCommand("open")} to see it`);
     } catch (error) {
       // A page that cannot start must not take the gateway down with it.
       log.warn("the gateway page could not start; continuing without it", String(error));

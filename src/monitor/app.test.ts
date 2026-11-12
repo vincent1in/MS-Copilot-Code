@@ -48,7 +48,10 @@ describe("the Set up page's state", () => {
     const { app, dir } = controller();
     const state = await app.state();
     expect(state.account).toBe("alice@contoso.com");
-    expect(state.signIn).toEqual({ available: false, running: false, command: `node "${join(dir, "gateway")}/dist/cli.mjs" login` });
+    const cli = join(dir, "gateway", "dist", "cli.mjs");
+    expect(state.signIn).toEqual({ available: false, running: false, command: `node "${cli}" login` });
+    // Nothing puts an `opencode-m365` command on the PATH, so every command shown runs from any folder.
+    expect(state.commands).toEqual({ login: `node "${cli}" login`, open: `node "${cli}" open`, setup: `node "${cli}" setup --quiet` });
     expect(state.opencode).toMatchObject({ connected: false, pluginDir: join(dir, "gateway"), quietSettings: { update: "disable", share: "disabled", websearch: false } });
     expect(state.hosts).toEqual([
       { purpose: "auth", host: "login.microsoftonline.com" },

@@ -932,17 +932,23 @@ button:disabled {
   margin: 0 0 4px;
 }
 
+/* The code scrolls sideways in its own box; the Copy button sits beside it, never on it. */
 .snippet {
-  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 72ch;
   margin: 8px 0 12px;
-}
-
-.snippet pre {
-  font: 12.5px/1.5 var(--font-code);
   background: var(--surface);
   border: 1px solid var(--rule);
   border-radius: 4px;
-  padding: 10px 76px 10px 12px;
+}
+
+.snippet pre {
+  flex: 1;
+  min-width: 0;
+  font: 12.5px/1.5 var(--font-code);
+  padding: 10px 0 10px 12px;
   margin: 0;
   /* Code keeps its lines; a long one scrolls rather than breaking mid-word. */
   white-space: pre;
@@ -950,9 +956,8 @@ button:disabled {
 }
 
 .snippet button {
-  position: absolute;
-  top: 6px;
-  right: 6px;
+  flex: none;
+  margin: 6px 6px 6px 0;
   font-size: 12px;
   padding: 1px 8px;
 }

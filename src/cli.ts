@@ -22,7 +22,7 @@ import { listMonitorLinks } from "./monitor/links.js";
 import { createMonitor } from "./monitor/monitor.js";
 import { openInBrowser } from "./open-url.js";
 import { connectOpenCode, openCodeStatus } from "./opencode-config.js";
-import { CACHE_FILE, CONFIG_DIR, SECRETS_FILE } from "./paths.js";
+import { CACHE_FILE, CONFIG_DIR, SECRETS_FILE, gatewayCommand } from "./paths.js";
 import { startServer } from "./server.js";
 import { CopilotSession } from "./session.js";
 import { createSettingsStore, type SettingState } from "./settings.js";
@@ -108,7 +108,7 @@ async function doStart(args: string[]): Promise<void> {
       if (!args.includes("--no-open")) openInBrowser(running.link);
       return;
     }
-    console.error(`Port ${port} is in use by another program. Start on another one: opencode-m365 start --port ${port + 1}`);
+    console.error(`Port ${port} is in use by another program. Start on another one: ${gatewayCommand(`start --port ${port + 1}`)}`);
     process.exitCode = 1;
     return;
   }
@@ -141,7 +141,7 @@ function doOpen(): void {
   const [newest] = listMonitorLinks();
   if (!newest) {
     console.log("No gateway with a page is running.");
-    console.log('Start one with `opencode-m365 start`, or turn on "Start this page with OpenCode" in its Settings.');
+    console.log(`Start one with ${gatewayCommand("start")}, or choose to start it under "When OpenCode starts" in its Settings.`);
     return;
   }
   console.log(`Opening the page of gateway ${newest.pid}:\n  ${newest.link}`);
@@ -158,7 +158,7 @@ async function doLogin(): Promise<void> {
     });
     console.log(`\nSigned in as ${account}.`);
     console.log(`Token cache written to ${CACHE_FILE}`);
-    console.log("\nNext: send a test message and connect OpenCode — opencode-m365 start");
+    console.log(`\nNext: ${gatewayCommand("start")} opens the page, where you send a test message and connect OpenCode.`);
   } catch (error) {
     console.error(`\nSign-in failed: ${(error as Error).message}`);
     process.exitCode = 1;
@@ -235,7 +235,7 @@ function describeWorkIq(policy: string): string {
 function doMonitor(): void {
   const links = listMonitorLinks();
   if (links.length === 0) {
-    console.log("No gateway with a page is running. Start one with `opencode-m365 start`.");
+    console.log(`No gateway with a page is running. Start one with ${gatewayCommand("start")}.`);
     return;
   }
   for (const entry of links) {
@@ -256,7 +256,7 @@ async function doDoctor(args: string[]): Promise<void> {
   // Missing on a first run, which is fine: signing in creates it.
   const haveConfig = existsSync(CONFIG_DIR);
   console.log(`  ${haveConfig ? "ok  " : "..  "}  config directory — ${CONFIG_DIR}${haveConfig ? "" : " (not created yet; signing in creates it)"}`);
-  check("token cache", existsSync(CACHE_FILE), existsSync(CACHE_FILE) ? CACHE_FILE : "not signed in: run `opencode-m365 start` or `opencode-m365 login`");
+  check("token cache", existsSync(CACHE_FILE), existsSync(CACHE_FILE) ? CACHE_FILE : `not signed in: run ${gatewayCommand("start")}`);
   if (existsSync(SECRETS_FILE)) {
     // Left over from upstream's automated sign-in. This fork never reads it, but it
     // still holds a password and a TOTP seed in plain text.
@@ -311,7 +311,7 @@ async function doDoctor(args: string[]): Promise<void> {
   console.log("\nOpenCode");
   const status = openCodeStatus();
   if (status.problem) check("config readable", false, `${status.configPath} is ${status.problem}`);
-  check("gateway connected", status.connected, status.connected ? status.configPath : "see the Set up page, or run `opencode-m365 setup`");
+  check("gateway connected", status.connected, status.connected ? status.configPath : `see the Set up page, or run ${gatewayCommand("setup --quiet")}`);
 
   if (args.includes("--browser")) {
     const seconds = secondsFrom(args) ?? 60;

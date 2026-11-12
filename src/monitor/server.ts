@@ -128,7 +128,7 @@ export async function startMonitorServer(options: MonitorServerOptions): Promise
 
     if (path === "/events" || path === "/clear" || path.startsWith("/api/")) {
       if (!hasToken(request.headers.authorization, token)) {
-        return send(response, 401, TEXT, "Open this page from the link `opencode-m365 open` (or `monitor`) gives; this one is missing its key.");
+        return send(response, 401, TEXT, "Open this page with the link the gateway printed when it started; this one is missing its key.");
       }
       if (path === "/events") {
         if (method !== "GET") return send(response, 405, TEXT, "Use GET.");
