@@ -16,6 +16,7 @@ import { z } from "zod";
 import { buildToolPrompt, parseToolCalls, renderToolCall, type ParsedToolCall, type ToolDef } from "./fenced.js";
 import type { TurnResult } from "./session.js";
 
+
 // --- request schema -------------------------------------------------------------
 
 const ContentPart = z.object({ type: z.string(), text: z.string().optional() }).passthrough();

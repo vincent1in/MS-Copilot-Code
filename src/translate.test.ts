@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ToolDef } from "./fenced.js";
 import {
   ChatCompletionRequest,
@@ -560,5 +560,43 @@ describe("tool results", () => {
     const prompt = buildTurnPrompt(messages, [bashTool], 1, { note: "Only the first call ran." });
     expect(prompt).toContain("Only the first call ran.");
     expect(prompt.indexOf("Only the first call ran.")).toBeLessThan(prompt.indexOf("<tool_response"));
+  });
+});
+
+describe("zod code generation", () => {
+  it("leaves zod's process-wide config alone (opencode shares it)", async () => {
+    await import("./translate.js");
+    const { z } = await import("zod");
+    expect(z.config().jitless).not.toBe(true);
+  });
+
+  it("generates no code when parsing jitless — and the detector does see the JIT otherwise", async () => {
+    // zod compiles each schema's fast path once and caches it, so every measurement
+    // uses a freshly evaluated copy of the schemas.
+    const sample = {
+      model: "quick",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "bash", parameters: {} } }],
+    };
+    async function functionsConstructed(options: { jitless?: boolean }): Promise<number> {
+      vi.resetModules();
+      const { ChatCompletionRequest: Fresh } = await import("./translate.js");
+      const RealFunction = globalThis.Function;
+      let constructed = 0;
+      globalThis.Function = new Proxy(RealFunction, {
+        construct(target, args) {
+          constructed += 1;
+          return Reflect.construct(target, args);
+        },
+      });
+      try {
+        Fresh.parse(sample, options);
+      } finally {
+        globalThis.Function = RealFunction;
+      }
+      return constructed;
+    }
+    expect(await functionsConstructed({})).toBeGreaterThan(0);
+    expect(await functionsConstructed({ jitless: true })).toBe(0);
   });
 });

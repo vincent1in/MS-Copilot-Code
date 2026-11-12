@@ -6,7 +6,7 @@ it is, and lists the failure modes that will otherwise bite you.
 ## Getting set up
 
 ```sh
-npm ci
+npm ci --ignore-scripts
 npm test        # typecheck + suite; no network, no credentials, no live M365
 npm run typecheck
 npm run build
@@ -22,7 +22,7 @@ proxy against the stub and point the plugin at it with the `baseUrl` and `apiKey
 
 ## Conventional Commits
 
-The PR title becomes the squash subject, and release-please reads it:
+The PR title becomes the squash subject. (Upstream's release-please automation is not used in this fork; the convention is kept for readable history.)
 
 - `feat:` → minor, `fix:` → patch, `!` or `BREAKING CHANGE` → major
 - `perf`/`refactor`/`docs` appear in the changelog without bumping

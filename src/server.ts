@@ -35,7 +35,7 @@ import {
 import { collectImages } from "./image.js";
 import { parseToolCalls } from "./fenced.js";
 import { looksLikeGiveUp, nudgeFor } from "./giveup.js";
-import { createLogger } from "./log.js";
+import { createLogger, redact } from "./log.js";
 
 const log = createLogger("server");
 
@@ -73,6 +73,8 @@ export interface ServerDeps {
   endpoint?: string;
   /** Keep every tool call the model emits rather than only the first. */
   allowMultiTool?: boolean;
+  /** Offer Copilot's Bing web search plugin on agent-less turns. Off by default. */
+  webSearch?: boolean;
   /**
    * Trim the harness's toolset before the model sees it.
    *
@@ -309,7 +311,10 @@ async function handleChatCompletion(
 ): Promise<void> {
   let body: ChatRequest;
   try {
-    body = ChatCompletionRequest.parse(JSON.parse(await readBody(request, context.maxBodyBytes)));
+    // `jitless` per call: zod v4 otherwise compiles a fast-path parser with
+    // `new Function`. Passing it here rather than via z.config() matters: zod keeps its
+    // config on globalThis, so a global setting would also change opencode's own zod.
+    body = ChatCompletionRequest.parse(JSON.parse(await readBody(request, context.maxBodyBytes)), { jitless: true });
   } catch (error) {
     if (error instanceof PayloadTooLargeError) {
       sendError(response, 413, "request_too_large", error.message);
@@ -388,7 +393,7 @@ function defaultTurnLog(): ((entry: TurnLogEntry) => void) | null {
   if (envTurnLog === undefined) {
     const file = process.env.M365_TURN_LOG;
     const append = file ? createPrivateAppender(file) : null;
-    envTurnLog = append ? (entry) => append(`${JSON.stringify(entry)}\n`) : null;
+    envTurnLog = append ? (entry) => append(`${redact(JSON.stringify(entry))}\n`) : null;
   }
   return envTurnLog;
 }
@@ -410,12 +415,9 @@ async function runTurn(
     ...(context.deps.endpoint ? { endpoint: context.deps.endpoint } : {}),
   });
 
-  // A grounded (mailbox) model is read-only Q&A over the user's own data: it
-  // carries no opencode tools, so the fenced tool prompt is never attached, no
-  // declarative agent is wired, and no tool-call parsing runs on its answer. That
-  // is what keeps "ask your work" from being handed a coding toolset it can't act
-  // on. Every tools-derived decision below reads `effectiveTools`.
-  const effectiveTools = model.grounded ? [] : tools;
+  // Every tools-derived decision below reads `effectiveTools`. (Upstream emptied it
+  // for mailbox-grounded models, which this fork removes.)
+  const effectiveTools = tools;
 
   // Only the messages this turn carries: M365 already has any earlier image.
   const images = collectImages(body.messages, conversation.sentMessageCount);
@@ -441,10 +443,8 @@ async function runTurn(
   const streaming = body.stream === true;
   const streamId = `chatcmpl-${randomUUID()}`;
   // Only a tool-less turn can stream: a fenced tool call is not parseable until the
-  // fence closes, so a tool turn has to be buffered and emitted at the end. A
-  // grounded turn is also buffered, so its answer is emitted once with the citation
-  // tokens already stripped rather than streaming them raw.
-  const canStreamText = streaming && effectiveTools.length === 0 && !model.grounded;
+  // fence closes, so a tool turn has to be buffered and emitted at the end.
+  const canStreamText = streaming && effectiveTools.length === 0;
 
   if (streaming) startSse(response);
 
@@ -463,7 +463,7 @@ async function runTurn(
   const turnOptions = {
     ...(model.tone ? { tone: model.tone } : {}),
     agentId: agent,
-    ...(model.grounded ? { grounded: true } : {}),
+    ...(context.deps.webSearch ? { webSearch: true } : {}),
     signal: abort.signal,
   };
   const recordTurn = (result: TurnResult, extra: Partial<TurnLogEntry> = {}) =>

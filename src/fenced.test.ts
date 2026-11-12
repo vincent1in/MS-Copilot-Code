@@ -336,3 +336,13 @@ describe("mixed output", () => {
     expect(text).toBe("");
   });
 });
+
+describe("parsing cost", () => {
+  it("stays linear on a reply of blank lines (it runs on opencode's event loop)", () => {
+    const bash: ToolDef = { type: "function", function: { name: "bash", parameters: { type: "object", properties: { command: { type: "string" } } } } };
+    const started = performance.now();
+    parseToolCalls(`x${"\n".repeat(40_000)}y`, [bash]);
+    // `^\s*` under the m flag made this ~4 s before.
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});

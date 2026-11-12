@@ -24,6 +24,7 @@ import { WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 import { createLogger, trunc } from "./log.js";
 import { uploadImage, type ImageAnnotation } from "./image.js";
+import { assertEgress } from "./egress.js";
 
 const log = createLogger("session");
 
@@ -50,20 +51,6 @@ const VARIANTS = [
   "feature.EnableCodeInterpreter",
   "feature.EnableSydneyClientCompliance",
   "feature.EnableStreaming",
-].join(",");
-
-/**
- * The variants the Outlook side-pane client sends, used only for a grounded
- * turn. Verified live 2026-11-09: without them the mailbox scenario replies
- * "you don't have a valid license" (contentOrigin "BotConnection"). Cargo-culted
- * from a captured first-party side-pane session, exactly as VARIANTS above is.
- */
-const GROUNDED_VARIANTS = [
-  "feature.OutlookSidepaneWorkCopilotToHelix",
-  "feature.EnableStarterLicenseCheckBypass",
-  "feature.IsStreamingModeInChatRequestEnabled",
-  "feature.isExternalEmailEnabled",
-  "IncludeSourceAttributionsConcise",
 ].join(",");
 
 /** The message types we tell the server we are able to render. */
@@ -171,13 +158,11 @@ export interface TurnOptions {
   /** Declarative agent id, when the turn needs server-side tool instructions. */
   agentId?: string | null;
   /**
-   * Ground the turn on the signed-in mailbox. Switches the request to the Outlook
-   * side-pane scenario and attaches the built-in agent with the `WorkSearch`
-   * capability — which is what makes Copilot search the user's own mail, calendar
-   * and files server-side. Takes precedence over `agentId`. Off by default: a
-   * coding turn must not reach into the mailbox.
+   * Offer Copilot its built-in Bing web search plugin on an agent-less turn. Off by
+   * default in this fork: with it, Copilot may turn parts of the prompt — which on a
+   * coding turn includes your code — into Bing queries.
    */
-  grounded?: boolean;
+  webSearch?: boolean;
   signal?: AbortSignal;
   onDelta?: (chunk: string) => void;
   /**
@@ -185,31 +170,6 @@ export interface TurnOptions {
    * conversation before the turn and referenced from the chat message.
    */
   images?: readonly string[];
-}
-
-/**
- * Strip Copilot's inline citation control tokens from a GROUNDED answer.
- *
- * The web UI renders these as citation chips; over the wire they arrive as
- * literal noise: private-use-area delimiters (U+E000–U+F8FF) wrapping
- * `cite…turn1search23…` runs, plus `【2-9c5ade】`-style attribution markers.
- * Only the side-pane (grounded) surface emits them, which is why the caller runs
- * this on grounded turns only — a coding answer is passed through untouched, so
- * its indentation is never altered.
- *
- * Even here the whitespace tidy is indentation-safe: it collapses only runs that
- * FOLLOW a non-space character (the double spaces a removed token leaves mid
- * line), never leading indentation — a grounded answer can still contain a code
- * block. Measured against live answers 2026-11-09.
- */
-export function cleanAnswer(text: string): string {
-  return text
-    .replace(/[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/gu, "")
-    .replace(/cite(?:turn\d+[a-z]+\d+)+/gi, "")
-    .replace(/【[^】]{1,60}】/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/(\S)[ \t]{2,}/g, "$1 ")
-    .trim();
 }
 
 /**
@@ -243,7 +203,9 @@ export class CopilotSession {
 
     const token = await this.options.getToken();
     const { oid, tid } = decodeJwt(token);
-    const url = this.buildUrl(token, oid, tid, turn.grounded ?? false);
+    const url = this.buildUrl(token, oid, tid);
+    // Refuse before the token goes anywhere but substrate.office.com (or the test stub).
+    assertEgress("chat", url);
 
     const { annotations, note } = await this.uploadImages(token, turn);
     const message: OutgoingMessage = { text: note ? `${text}\n\n${note}` : text, annotations };
@@ -300,14 +262,16 @@ export class CopilotSession {
     return { annotations, note };
   }
 
-  private buildUrl(token: string, oid: string, tid: string, grounded: boolean): string {
+  private buildUrl(token: string, oid: string, tid: string): string {
     const origin = this.options.endpoint ?? DEFAULT_ENDPOINT;
-    // The full-screen chat scenario does not ground on the mailbox; the Outlook
-    // side-pane scenario does. Verified live 2026-11-09 — the side-pane params
-    // are what returned real inbox results.
-    const scenarioParams: Record<string, string> = grounded
-      ? { source: '"owahub"', product: "OwaHub", agentHost: "Bizchat.Sidepane", scenario: "OutlookSidepaneWorkCopilot", agent: "work" }
-      : { source: '"officeweb"', product: "Office", agentHost: "Bizchat.FullScreen", scenario: "OfficeWebIncludedCopilot" };
+    // The full-screen Copilot Chat scenario: no mailbox grounding. (Upstream's
+    // mailbox-grounded Outlook side-pane scenario is removed in this fork.)
+    const scenarioParams: Record<string, string> = {
+      source: '"officeweb"',
+      product: "Office",
+      agentHost: "Bizchat.FullScreen",
+      scenario: "OfficeWebIncludedCopilot",
+    };
     const params = new URLSearchParams({
       access_token: token,
       ConversationId: this.conversationId,
@@ -315,7 +279,7 @@ export class CopilotSession {
       "X-SessionId": this.sessionId,
       clientrequestid: randomUUID(),
       ...scenarioParams,
-      variants: grounded ? GROUNDED_VARIANTS : VARIANTS,
+      variants: VARIANTS,
     });
     return `${origin}/m365Copilot/Chathub/${oid}@${tid}?${params.toString()}`;
   }
@@ -339,15 +303,14 @@ export class CopilotSession {
         }
         // The server sends the answer twice — incrementally and as a snapshot — and
         // either can be the more complete one depending on where the turn ended.
-        // Only a grounded turn carries citation tokens; a coding answer is passed
-        // through verbatim so its indentation and tool-call fences are never touched.
+        // Passed through verbatim so its indentation and tool-call fences are never touched.
         const raw = deltaText.length >= snapshotText.length ? deltaText : snapshotText;
         const refusal = refusalOf(result, raw);
         if (refusal) {
           reject(refusal);
           return;
         }
-        result.text = turn.grounded ? cleanAnswer(raw) : raw;
+        result.text = raw;
         resolve(result);
       };
 
@@ -456,36 +419,21 @@ export class CopilotSession {
     const argument: Record<string, unknown> = {
       message,
       tone: turn.tone ?? "magic",
-      source: turn.grounded ? "owahub" : "officeweb",
+      source: "officeweb",
       streamingMode: "ConciseWithPadding",
       isStartOfSession: this.turnIndex === 0,
       conversationId: this.conversationId,
       allowedMessageTypes: ALLOWED_MESSAGE_TYPES,
       optionsSets: [],
-      clientInfo: turn.grounded
-        ? { clientPlatform: "OwaHub-web", clientAppName: "OwaHub", clientAppType: "Web", productEntryPoint: "Email" }
-        : {
-            clientPlatform: "mcmcopilot-web",
-            clientAppName: "Office",
-// eslint-disable-next-line @typescript-eslint/naming-convention
-            clientAppVersion: "1.0.0",
-          },
+      clientInfo: {
+        clientPlatform: "mcmcopilot-web",
+        clientAppName: "Office",
+        clientAppVersion: "1.0.0",
+      },
       traceId: randomUUID(),
     };
 
-    if (turn.grounded) {
-      // The built-in side-pane agent. `WorkSearch` grounds the turn on the
-      // signed-in mailbox; `WebSearch` keeps Bing fallback. Takes precedence over
-      // any declarative agentId — a grounded turn is a mailbox turn, not a coding one.
-      argument.gpts = [
-        {
-          id: "bizchat-as-gpt-scenario",
-          source: "BuiltInAgents",
-          clientOverrides: { capabilities: [{ name: "WebSearch" }, { name: "WorkSearch" }] },
-        },
-      ];
-      argument.plugins = [{ Id: "BingWebSearch", Source: "BuiltIn" }];
-    } else if (turn.agentId) {
+    if (turn.agentId) {
       // With an agent attached, the declarative-agent fields replace `plugins`.
       argument.threadLevelGptId = { id: turn.agentId, source: "MOS3" };
       argument.gpts = [
@@ -496,7 +444,10 @@ export class CopilotSession {
           clientOverrides: { capabilities: [], "deepResearchModels@odata.type": "Collection(String)" },
         },
       ];
-    } else {
+    } else if (turn.webSearch) {
+      // Opt-in only (see TurnOptions.webSearch). Upstream sent this on every
+      // agent-less turn; omitting it matches the request shape of an agent turn,
+      // which never carries `plugins`.
       argument.plugins = [{ Id: "BingWebSearch", Source: "BuiltIn" }];
     }
 
@@ -518,7 +469,7 @@ export class CopilotSession {
 
     log.info(
       "sending turn",
-      trunc({ tone: argument.tone, agent: Boolean(turn.agentId), grounded: Boolean(turn.grounded), images: outgoing.annotations.length, text }),
+      trunc({ tone: argument.tone, agent: Boolean(turn.agentId), images: outgoing.annotations.length, text }),
     );
     // Both frames, one send. This is the part that silently breaks everything.
     socket.send(`${JSON.stringify(chat)}${RS}${JSON.stringify(metrics)}${RS}`);

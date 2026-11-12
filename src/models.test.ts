@@ -19,13 +19,12 @@ describe("model catalog", () => {
     }
   });
 
-  it("marks the work models mailbox-grounded, and leaves coding models ungrounded", () => {
-    expect(resolveModel("work").grounded).toBe(true);
-    expect(resolveModel("work-think").grounded).toBe(true);
-    expect(resolveModel("work").tone).toBeTruthy();
-    expect(resolveModel("gpt-5.5").grounded).toBeFalsy();
-    // Addressed as m365/<id> by opencode; the provider-stripped form resolves too.
-    expect(resolveModel("m365/work").grounded).toBe(true);
+  it("has no mailbox-grounded models (removed in this fork)", () => {
+    const ids = MODELS.map((model) => model.id);
+    expect(ids).not.toContain("work");
+    expect(ids).not.toContain("work-think");
+    // An old config naming one falls back to the default coding model.
+    expect(resolveModel("m365/work").id).toBe(DEFAULT_MODEL);
   });
 
   it("has unique ids", () => {
@@ -60,9 +59,23 @@ describe("model catalog", () => {
     expect(toneFor("something-we-never-shipped")).toBe(toneFor(DEFAULT_MODEL));
   });
 
-  it("defaults to a chat tone, the kind measured making tool calls on a live tenant", () => {
-    expect(DEFAULT_MODEL).toBe("quick");
-    expect(resolveModel(DEFAULT_MODEL).reasoning).toBe(false);
+  it("defaults to GPT-6.1 Sol, the best-measured tone for agent-less tool turns", () => {
+    // This fork's Studio agent is opt-in, so tool turns normally run agent-less; see
+    // the comment on DEFAULT_MODEL for the measurements behind this choice.
+    expect(DEFAULT_MODEL).toBe("gpt-6.1-sol");
+    expect(toneFor(DEFAULT_MODEL)).toBe("Gpt_61_Sol_Reasoning");
+    expect(toneFor("gpt-6-sol")).toBe("Gpt_6_Sol_Reasoning");
+    // The upstream default stays selectable.
+    expect(toneFor("quick")).toBe("Gpt_5_5_Chat");
+  });
+
+  it("puts the Sol tones on the relay framing with the measured sandbox note", () => {
+    for (const tone of ["Gpt_61_Sol_Reasoning", "Gpt_6_Sol_Reasoning"]) {
+      const route = toolRouteFor(tone);
+      expect(route.framing).toBe("relay");
+      expect(route.sandbox).toContain("bash_tool");
+    }
+    expect(toolRouteFor("Gpt_5_5_Chat")).toEqual({ framing: "default", agent: true });
   });
 
   it("offers the GPT-5.6 chat tone", () => {
@@ -100,17 +113,9 @@ describe("model picker names", () => {
   // opencode 2's Model.Info has no description, so `name` is all the picker shows.
   const withReach = MODELS.filter((model) => model.tone !== null);
 
-  it("marks every grounded model as Work and every other model as Code", () => {
+  it("marks every model that reaches M365 as a Code model", () => {
     for (const model of withReach) {
-      expect(model.name, `model ${model.id} has the wrong purpose prefix`).toMatch(
-        model.grounded ? /^Work · / : /^Code · /,
-      );
-    }
-  });
-
-  it("says what a Work model reads", () => {
-    for (const model of withReach.filter((candidate) => candidate.grounded)) {
-      expect(model.name, `model ${model.id} does not say what it reads`).toMatch(/mail, Teams & files/);
+      expect(model.name, `model ${model.id} has the wrong purpose prefix`).toMatch(/^Code · /);
     }
   });
 

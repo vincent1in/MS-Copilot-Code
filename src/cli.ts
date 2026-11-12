@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTokenClient } from "./auth.js";
 import { getOrCreateAgent } from "./agent.js";
-import { PROVIDER_ID, mergeOpencodeConfig, type PluginPathInfo } from "./config.js";
+import { PROVIDER_ID, mergeOpencodeConfig, studioAgentEnabled, webSearchEnabled, type PluginPathInfo } from "./config.js";
 import { checkTones, distinctTones } from "./live-check.js";
 import { DEFAULT_MODEL, LOCAL_TITLE_MODEL, MODELS } from "./models.js";
 import { CopilotSession } from "./session.js";
@@ -48,51 +48,54 @@ async function main(): Promise<void> {
 function printHelp(): void {
   console.log(`opencode-m365 — use Microsoft 365 Copilot as opencode's model backend
 
-  login [--interactive]   Sign in to Microsoft 365 and store the token cache
-  setup [--local]         Add the plugin to ~/.config/opencode/opencode.json
+  login                   Sign in to Microsoft 365 in a browser window (SSO/MFA by
+                          hand, once) and store the token cache
+  setup                   Point ~/.config/opencode/opencode.json at this checkout's
+                          build (never at an npm package name)
   serve [--port <n>]      Run the OpenAI-compatible proxy standalone
                           (key from M365_PROXY_KEY, else printed)
-  doctor [--live]         Check auth, the agent, and the proxy
+  doctor [--live]         Check auth, the proxy and opencode wiring (read-only:
+                          never provisions the Copilot Studio agent)
                           (--live also sends one short message per model tone)
 
 Config lives in ${CONFIG_DIR}
 
-Sign-in needs either a TOTP seed in secrets.json (headless), or --interactive
-to complete SSO/MFA by hand once — the only option on tenants with push-only
-MFA, FIDO2, or a federated IdP.`);
+Sign-in is interactive only. Use a browser you already have with
+M365_BROWSER_CHANNEL=msedge (or chrome), or CHROMIUM_PATH=/path/to/browser.`);
 }
 
 async function doLogin(args: string[]): Promise<void> {
   // Imported here so the heavy browser dependency never loads for other commands.
   const { login } = await import("./login.js");
-  const interactive = args.includes("--interactive");
+  // Always interactive in this fork; `--interactive` is accepted and ignored so old
+  // instructions keep working.
+  void args;
 
   try {
-    const account = await login({ interactive, onStatus: (message) => console.log(`  ${message}`) });
+    const account = await login({ onStatus: (message) => console.log(`  ${message}`) });
     console.log(`\nSigned in as ${account}.`);
     console.log(`Token cache written to ${CACHE_FILE}`);
     console.log("\nNext: opencode-m365 setup");
   } catch (error) {
     console.error(`\nSign-in failed: ${(error as Error).message}`);
-    if (!interactive) {
-      console.error("\nIf your tenant has no TOTP option (push-only MFA, FIDO2, Okta/Ping/Duo),");
-      console.error("try: opencode-m365 login --interactive");
-    }
     process.exitCode = 1;
   }
 }
 
 async function doSetup(args: string[]): Promise<void> {
-  // An npm install is referenced by name, a local checkout by its directory —
-  // opencode 2 refuses a file path. `pluginRef` is how older versions referenced us
-  // under opencode 1's key, so that entry can be found and removed; see
-  // `mergeOpencodeConfig`.
-  const local = args.includes("--local");
+  // Always this checkout's build, referenced by its directory (opencode 2 refuses a
+  // file path). Upstream defaulted to the npm name, which makes opencode install the
+  // published upstream package — code nobody here reviewed — on its next start. This
+  // fork is private and never published, so a name could only ever resolve to
+  // someone else's package. `--local` is accepted and ignored. `pluginRef` is how
+  // older versions referenced us under opencode 1's key, so that entry can be found
+  // and removed; see `mergeOpencodeConfig`, which also replaces an upstream npm entry.
+  void args;
   const dist = dirname(fileURLToPath(import.meta.url));
-  const pluginRef = local ? resolve(dist, "plugin.mjs") : "opencode-m365-copilot";
-  const pluginDir = local ? resolve(dist, "..") : pluginRef;
+  const pluginRef = resolve(dist, "plugin.mjs");
+  const pluginDir = resolve(dist, "..");
 
-  if (local && !existsSync(pluginRef)) {
+  if (!existsSync(pluginRef)) {
     console.error(`No build at ${pluginRef}. Run \`npm run build\` first.`);
     process.exitCode = 1;
     return;
@@ -155,9 +158,14 @@ async function doServe(args: string[]): Promise<void> {
   // otherwise every launch mints a fresh one.
   const fixedKey = process.env.M365_PROXY_KEY || undefined;
 
+  const useStudioAgent = studioAgentEnabled();
   const proxy = await startServer({
     getToken: () => tokens.getToken(),
-    resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }),
+    // Opt-in only (M365_STUDIO_AGENT=1): provisioning creates a bot in the tenant.
+    ...(useStudioAgent
+      ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
+      : {}),
+    webSearch: webSearchEnabled(),
     port,
     ...(fixedKey ? { apiKey: fixedKey } : {}),
   });
@@ -165,6 +173,8 @@ async function doServe(args: string[]): Promise<void> {
   console.log(`M365 Copilot proxy listening on ${proxy.url}`);
   console.log(`  models:      ${proxy.url}/v1/models`);
   console.log(`  completions: ${proxy.url}/v1/chat/completions`);
+  console.log(`  studio agent: ${useStudioAgent ? "enabled (M365_STUDIO_AGENT=1)" : "disabled — nothing is created in your tenant"}`);
+  console.log(`  web search:   ${webSearchEnabled() ? "enabled (M365_WEB_SEARCH=1)" : "disabled — Copilot is not offered Bing on coding turns"}`);
   console.log("\nLoopback-only. Every request must send `Authorization: Bearer <key>`;");
   console.log("browser origins and CORS are refused.");
   if (fixedKey) {
@@ -192,7 +202,11 @@ async function doDoctor(args: string[]): Promise<void> {
   console.log("Config");
   check("config directory", existsSync(CONFIG_DIR), CONFIG_DIR);
   check("token cache", existsSync(CACHE_FILE), existsSync(CACHE_FILE) ? CACHE_FILE : "run `opencode-m365 login`");
-  console.log(`  ..    stored credentials — ${existsSync(SECRETS_FILE) ? "present" : "absent (interactive login only)"}`);
+  if (existsSync(SECRETS_FILE)) {
+    // Left over from upstream's automated sign-in. This fork never reads it, but it
+    // still holds a password and a TOTP seed in plain text.
+    console.log(`  WARN  ${SECRETS_FILE} exists — it holds a password and TOTP seed and is never read by this fork. Delete it.`);
+  }
 
   console.log("\nAuthentication");
   const tokens = createTokenClient();
@@ -205,20 +219,15 @@ async function doDoctor(args: string[]): Promise<void> {
     check("chat token", false, (error as Error).message);
   }
 
-  console.log("\nDeclarative agent");
-  if (!signedIn) {
-    console.log("  skip  needs a signed-in account");
+  // Read-only: doctor reports on the agent but never provisions one. Creating a bot
+  // in the tenant is not something a health check should do.
+  console.log("\nCopilot Studio agent (opt-in)");
+  if (!studioAgentEnabled()) {
+    console.log('  ..    disabled — nothing is created in your tenant. Enable with { "studioAgent": true } or M365_STUDIO_AGENT=1');
   } else {
-    try {
-      const agentId = await getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) });
-      check("agent", true, agentId);
-    } catch (error) {
-      // Not fatal: without it tool calling is less reliable, but chat still works.
-      console.log(`  warn  agent unavailable — ${(error as Error).message}`);
-      console.log("        Tool calling will be markedly less reliable without it.");
-    }
+    console.log("  ..    enabled — provisioned lazily on the first tool turn");
   }
-  console.log(`  ..    cache — ${existsSync(AGENT_FILE) ? AGENT_FILE : "not yet provisioned"}`);
+  console.log(`  ..    cache — ${existsSync(AGENT_FILE) ? AGENT_FILE : "none"}`);
 
   console.log("\nProxy");
   try {

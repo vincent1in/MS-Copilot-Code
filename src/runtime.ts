@@ -10,7 +10,7 @@
 
 import { getOrCreateAgent } from "./agent.js";
 import { createTokenClient } from "./auth.js";
-import { resolveOptions, type PluginOptions } from "./config.js";
+import { resolveOptions, studioAgentEnabled, webSearchEnabled, type PluginOptions } from "./config.js";
 import { createLogger } from "./log.js";
 import { startServer } from "./server.js";
 
@@ -63,6 +63,9 @@ export interface M365Runtime {
  */
 export async function startRuntime(rawOptions?: Record<string, unknown>): Promise<M365Runtime> {
   const options = resolveOptions(rawOptions as Partial<PluginOptions> | undefined);
+  if (typeof rawOptions?.baseUrl === "string" && rawOptions.baseUrl !== "" && !options.baseUrl) {
+    log.warn("ignoring baseUrl: only a proxy on this machine (loopback http/https) is accepted; using the in-process proxy");
+  }
   const sharedKey = process.env.M365_PROXY_KEY || undefined;
 
   if (options.baseUrl) {
@@ -78,12 +81,18 @@ export async function startRuntime(rawOptions?: Record<string, unknown>): Promis
   }
 
   const tokens = createTokenClient();
+  // The Copilot Studio agent is opt-in (see PluginOptions.studioAgent). Without
+  // `resolveAgent` the proxy never asks for Power Platform / BAP tokens and never
+  // creates anything in the tenant; tool turns go out agent-less.
+  const useStudioAgent = studioAgentEnabled(options);
+  log.info(`Copilot Studio agent: ${useStudioAgent ? "enabled (provisioned lazily on the first tool turn)" : "disabled"}`);
   const proxy = await startServer({
     getToken: () => tokens.getToken(),
-    // Provisioning the declarative agent needs Copilot Studio scopes and a few
-    // round trips, so it happens lazily on the first turn that carries tools.
-    resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }),
+    ...(useStudioAgent
+      ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
+      : {}),
     lean: options.lean,
+    webSearch: webSearchEnabled(options),
     // Normally absent, so the proxy mints a fresh secret for this launch.
     ...(sharedKey ? { apiKey: sharedKey } : {}),
     ...(options.leanSystemPrompt ? { leanSystemPrompt: LEAN_SYSTEM_PROMPT } : {}),

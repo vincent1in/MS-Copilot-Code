@@ -6,6 +6,7 @@
  * so the interesting decisions are testable without opencode, a network, or a tenant.
  */
 
+import { isLoopbackHostname } from "./egress.js";
 import { MODELS, isLocalModel } from "./models.js";
 import { findShellTool, type ToolDef } from "./fenced.js";
 
@@ -133,6 +134,24 @@ export interface PluginOptions {
    * the preservation logic is ever wrong.
    */
   leanSystemPrompt: boolean;
+  /**
+   * Provision a Copilot Studio declarative agent and attach it to tool turns.
+   *
+   * OFF by default in this fork. When on, the first tool turn creates and publishes a
+   * bot named `m365-tool-agent-<hash>` in the tenant's default Power Platform
+   * environment (never deleted), which needs Copilot Studio access and Power Platform
+   * / BAP tokens. Off, nothing is created in the tenant and those scopes are never
+   * requested; tool turns run agent-less on the per-request fenced prompt.
+   * `M365_STUDIO_AGENT=1` turns it on for the CLI and the plugin alike.
+   */
+  studioAgent: boolean;
+  /**
+   * Let Copilot use its built-in Bing web search on coding turns. OFF by default in
+   * this fork: with it on, Copilot may send parts of your prompt — including code —
+   * to Bing as search queries. `M365_WEB_SEARCH=1` turns it on for the CLI and the
+   * plugin alike.
+   */
+  webSearch: boolean;
   /** Use an already-running proxy instead of starting one in-process. */
   baseUrl?: string;
   /**
@@ -141,6 +160,33 @@ export interface PluginOptions {
    * secret is generated and handed over automatically.
    */
   apiKey?: string;
+}
+
+/** `raw` if it is an http(s) URL on a loopback host with no credentials, else undefined. */
+export function loopbackBaseUrl(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || raw === "") return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  if (url.username || url.password) return undefined;
+  return isLoopbackHostname(url.hostname) ? raw : undefined;
+}
+
+/**
+ * Is the opt-in Copilot Studio agent enabled? The plugin option, or
+ * `M365_STUDIO_AGENT=1` (the only switch for `opencode-m365 serve`).
+ */
+export function studioAgentEnabled(options?: Pick<PluginOptions, "studioAgent">): boolean {
+  return options?.studioAgent === true || process.env.M365_STUDIO_AGENT === "1";
+}
+
+/** Is Bing web search allowed on coding turns? The plugin option, or `M365_WEB_SEARCH=1`. */
+export function webSearchEnabled(options?: Pick<PluginOptions, "webSearch">): boolean {
+  return options?.webSearch === true || process.env.M365_WEB_SEARCH === "1";
 }
 
 /** Where the proxy is, and the bearer secret it requires. */
@@ -164,7 +210,11 @@ export function resolveOptions(raw: Partial<PluginOptions> | undefined): PluginO
     setDefaultModel: bool(options.setDefaultModel, true),
     setSmallModel: bool(options.setSmallModel, true),
     leanSystemPrompt: bool(options.leanSystemPrompt, false),
-    baseUrl: typeof options.baseUrl === "string" ? options.baseUrl : undefined,
+    studioAgent: bool(options.studioAgent, false),
+    webSearch: bool(options.webSearch, false),
+    // opencode sends every prompt and the proxy key to `baseUrl`, so only a proxy on
+    // this machine is accepted; anything else falls back to the in-process proxy.
+    baseUrl: loopbackBaseUrl(options.baseUrl),
     apiKey: typeof options.apiKey === "string" && options.apiKey !== "" ? options.apiKey : undefined,
   };
 }
@@ -273,8 +323,20 @@ export interface PluginPathInfo {
   packageName?: string;
 }
 
-/** The npm name this package publishes under — what a checkout's package.json says. */
-export const PACKAGE_NAME = "opencode-m365-copilot";
+/**
+ * This fork's package name — what a checkout's package.json says. It is private and
+ * never published: setup always registers the local build by path, so opencode can
+ * never resolve this plugin from the npm registry.
+ */
+export const PACKAGE_NAME = "@vincent1in/opencode-m365-copilot";
+
+/**
+ * The upstream npm package this fork was taken from. Still recognised as "ours" so
+ * that setup replaces an upstream entry (which opencode would install from npm, i.e.
+ * unreviewed code) with this fork's local path.
+ */
+export const UPSTREAM_PACKAGE_NAME = "opencode-m365-copilot";
+const KNOWN_PACKAGE_NAMES: readonly string[] = [PACKAGE_NAME, UPSTREAM_PACKAGE_NAME];
 
 /** Every option key this plugin reads; anything else belongs to another plugin. */
 const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<keyof PluginOptions>([
@@ -282,6 +344,8 @@ const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<keyof PluginOptions>([
   "setDefaultModel",
   "setSmallModel",
   "leanSystemPrompt",
+  "studioAgent",
+  "webSearch",
   "baseUrl",
   "apiKey",
 ]);
@@ -423,11 +487,11 @@ function isOurPluginRef(
   inspect: (path: string) => PluginPathInfo,
 ): boolean {
   if (ref === incoming) return true;
-  if (ref.includes(PACKAGE_NAME) || ref.includes("opencode-copilot-plugin")) return true;
+  if (ref.includes(UPSTREAM_PACKAGE_NAME) || ref.includes("opencode-copilot-plugin")) return true;
   if (tail(ref) === "" || tail(ref) !== tail(incoming)) return false;
 
   const info = inspect(ref);
-  if (info.exists) return info.packageName === PACKAGE_NAME;
+  if (info.exists) return info.packageName !== undefined && KNOWN_PACKAGE_NAMES.includes(info.packageName);
   // No options at all counts as ours — see the doc comment for why.
   return Object.keys(options ?? {}).every((key) => OUR_OPTION_KEYS.has(key));
 }

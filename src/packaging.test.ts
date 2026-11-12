@@ -15,12 +15,24 @@ describe("packaging", () => {
   );
 
   it("bundles the runtime packages it relies on", () => {
-    expect(bundled).toEqual(expect.arrayContaining(["zod", "ws", "otpauth", "@azure/msal-node"]));
+    expect(bundled).toEqual(expect.arrayContaining(["zod", "ws", "@azure/msal-node"]));
   });
 
-  it.each(["zod", "ws", "otpauth", "@azure/msal-node"])("declares bundled %s as a runtime dependency, so its bumps release", (name) => {
+  it.each(["zod", "ws", "@azure/msal-node"])("declares bundled %s as a runtime dependency, so its bumps release", (name) => {
     expect(bundled).toContain(name);
     expect(pkg.dependencies?.[name]).toBeTruthy();
     expect(pkg.devDependencies?.[name]).toBeUndefined();
+  });
+
+  it("ships exactly these runtime dependencies and nothing else", () => {
+    // Every runtime dependency is reviewed code in the bundle; adding one is a review event.
+    expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual(["@azure/msal-node", "ws", "zod"]);
+  });
+
+  it("can never be published to npm, and pins exact versions", () => {
+    expect(pkg.private).toBe(true);
+    for (const [name, spec] of Object.entries({ ...pkg.dependencies, ...pkg.devDependencies })) {
+      expect(spec, name).toMatch(/^\d+\.\d+\.\d+$/);
+    }
   });
 });

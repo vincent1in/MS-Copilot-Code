@@ -12,8 +12,11 @@ import {
   buildProviderInfo,
   describeToolSelection,
   mergeOpencodeConfig,
+  PACKAGE_NAME,
   resolveOptions,
   selectLeanTools,
+  studioAgentEnabled,
+  webSearchEnabled,
 } from "./config.js";
 
 const names = (tools: readonly ToolDef[]) => tools.map((tool) => tool.function.name);
@@ -150,9 +153,74 @@ describe("plugin options", () => {
     expect(resolveOptions({}).apiKey).toBeUndefined();
   });
 
+  it("keeps the Copilot Studio agent off unless explicitly asked for", () => {
+    // Provisioning creates and publishes a bot in the tenant; this fork never does that
+    // by default.
+    const saved = process.env.M365_STUDIO_AGENT;
+    delete process.env.M365_STUDIO_AGENT;
+    try {
+      expect(resolveOptions({}).studioAgent).toBe(false);
+      expect(studioAgentEnabled(resolveOptions({}))).toBe(false);
+      expect(studioAgentEnabled(resolveOptions({ studioAgent: "yes" as unknown as boolean }))).toBe(false);
+      expect(studioAgentEnabled(resolveOptions({ studioAgent: true }))).toBe(true);
+      process.env.M365_STUDIO_AGENT = "1";
+      expect(studioAgentEnabled(resolveOptions({}))).toBe(true);
+      expect(studioAgentEnabled()).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.M365_STUDIO_AGENT;
+      else process.env.M365_STUDIO_AGENT = saved;
+    }
+  });
+
+  it("keeps Bing web search off on coding turns unless explicitly asked for", () => {
+    const saved = process.env.M365_WEB_SEARCH;
+    delete process.env.M365_WEB_SEARCH;
+    try {
+      expect(resolveOptions({}).webSearch).toBe(false);
+      expect(webSearchEnabled(resolveOptions({}))).toBe(false);
+      expect(webSearchEnabled(resolveOptions({ webSearch: true }))).toBe(true);
+      process.env.M365_WEB_SEARCH = "1";
+      expect(webSearchEnabled()).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.M365_WEB_SEARCH;
+      else process.env.M365_WEB_SEARCH = saved;
+    }
+  });
+
+  it("accepts a baseUrl only on this machine, since opencode sends it every prompt and the key", () => {
+    for (const ok of ["http://127.0.0.1:4141/v1", "http://localhost:4141/v1", "http://[::1]:4141/v1", "https://127.0.0.2:8443/v1"]) {
+      expect(resolveOptions({ baseUrl: ok }).baseUrl, ok).toBe(ok);
+    }
+    for (const bad of [
+      "https://evil.example/v1",
+      "http://127.0.0.1.evil.example/v1",
+      "http://127.0.0.1@evil.example/v1",
+      "http://user:pass@127.0.0.1:4141/v1",
+      "file:///etc/passwd",
+      "ws://127.0.0.1:4141/v1",
+      "not a url",
+    ]) {
+      expect(resolveOptions({ baseUrl: bad }).baseUrl, bad).toBeUndefined();
+    }
+  });
+
   it("ignores option values of the wrong type instead of crashing the plugin", () => {
     // opencode passes plugin options straight from user JSON.
     expect(resolveOptions({ lean: "yes" as unknown as boolean }).lean).toBe(true);
+  });
+});
+
+describe("setup never leaves opencode resolving the plugin from npm", () => {
+  it("replaces an upstream npm-name entry with this checkout's directory", () => {
+    const pluginDir = "/home/me/src/opencode-m365-copilot";
+    const merged = mergeOpencodeConfig(
+      { plugins: ["opencode-m365-copilot", "some-other-plugin"] },
+      { pluginRef: `${pluginDir}/dist/plugin.mjs`, pluginDir, inspect: () => ({ exists: true, packageName: PACKAGE_NAME }) },
+    );
+    const specs = JSON.stringify(merged.plugins);
+    expect(specs).toContain(pluginDir);
+    expect(specs).toContain("some-other-plugin");
+    expect((merged.plugins as unknown[]).some((entry) => entry === "opencode-m365-copilot")).toBe(false);
   });
 });
 

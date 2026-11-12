@@ -1,5 +1,5 @@
 /**
- * Interactive / automated sign-in. Loaded only by the CLI, never by the plugin.
+ * Interactive sign-in. Loaded only by the CLI, never by the plugin.
  *
  * Why a browser at all: the Sydney scopes are granted exclusively to Microsoft's own
  * Office web Copilot client, so we cannot register a loopback redirect
@@ -7,111 +7,30 @@
  * (`AADSTS7000218` — it wants a client secret only Microsoft has). The `nativeclient`
  * redirect is the only remaining door, and driving it needs a real browser.
  *
- * Two modes:
- *   - automated: stored credentials plus a TOTP seed, headless. Needs the seed
- *     itself, not a code from a phone.
- *   - interactive: a visible window where you complete SSO/MFA by hand. The only
- *     option for push-only MFA, FIDO2, or a federated IdP (Okta/Ping/Duo).
+ * This fork signs in **interactively only**: a visible window where you complete
+ * SSO/MFA yourself. Upstream also had an automated mode that typed a password and a
+ * TOTP code generated from a seed, both read from `secrets.json`. It is removed: a file
+ * holding both factors lets anyone who can read it pass MFA as you. A `secrets.json`
+ * left over from upstream is never read (`opencode-m365 doctor` warns if it exists).
+ *
+ * Browser: by default Playwright's bundled Chromium, which must already be installed
+ * (`npx playwright install chromium` downloads it — an explicit, separate step; nothing
+ * here downloads anything). To use a browser you already have instead, set
+ * `M365_BROWSER_CHANNEL=msedge` (or `chrome`), or `CHROMIUM_PATH` to its executable.
  *
  * Either way it is a one-time cost — afterwards `auth.ts` refreshes silently.
  */
 
-import { chmodSync, existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { z } from "zod";
+import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AUTHORITY, CLIENT_ID, REDIRECT_URI, SYDNEY_SCOPES, authCodeFromUrl, createCachePlugin } from "./auth.js";
-import { CONFIG_DIR, SECRETS_FILE } from "./paths.js";
-import { createLogger } from "./log.js";
+import { createGuardedNetworkClient } from "./egress.js";
+import { CONFIG_DIR } from "./paths.js";
 import { ensurePrivateDir } from "./private-fs.js";
 
-const log = createLogger("login");
-
-const SecretsSchema = z.object({
-  email: z.string().min(3),
-  password: z.string().min(1),
-  /**
-   * The base32 TOTP seed — what your authenticator derives its 6-digit codes from,
-   * not a code. Optional: without it, only interactive sign-in is possible.
-   */
-  mfaSecret: z.string().optional(),
-});
-
-export type Secrets = z.infer<typeof SecretsSchema>;
-
-/**
- * Read stored credentials, if any. Returns undefined when the file is absent.
- *
- * The file holds both sign-in factors, so a copy other local users can read is
- * tightened to 0600 on the spot, with a warning. A file we cannot tighten is refused.
- */
-export function loadSecrets(
-  file: string = SECRETS_FILE,
-  { warn = (message: string) => console.warn(message) }: { warn?: (message: string) => void } = {},
-): Secrets | undefined {
-  if (!existsSync(file)) return undefined;
-  guardSecretsMode(file, warn);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(file, "utf8"));
-  } catch (error) {
-    throw new Error(`${file} is not valid JSON: ${String(error)}`);
-  }
-  const result = SecretsSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new Error(`${file} is missing required fields: ${result.error.issues.map((i) => i.path.join(".")).join(", ")}`);
-  }
-  return result.data;
-}
-
-function guardSecretsMode(file: string, warn: (message: string) => void): void {
-  if (process.platform === "win32") return;
-  const mode = statSync(file).mode & 0o777;
-  if ((mode & 0o077) === 0) return;
-  try {
-    chmodSync(file, 0o600);
-  } catch (error) {
-    throw new Error(
-      `${file} is readable by other users (mode ${mode.toString(8)}) and could not be tightened: ${String(error)}. Run \`chmod 600 ${file}\`.`,
-    );
-  }
-  warn(
-    `${file} was readable by other users (mode ${mode.toString(8)}); it holds your password and TOTP seed, so it has been changed to 0600.`,
-  );
-}
-
-/**
- * Validate a TOTP seed before we try to use it.
- *
- * A common failure is pasting the whole `otpauth://` URI, or a 6-digit code, instead
- * of the seed. Both fail deep inside the login with an unhelpful message.
- */
-export function normaliseTotpSecret(raw: string): string {
-  let secret = raw.trim();
-  if (secret.startsWith("otpauth://")) {
-    const fromUri = new URL(secret).searchParams.get("secret");
-    if (!fromUri) throw new Error("That otpauth:// URI has no `secret` parameter");
-    secret = fromUri;
-  }
-  secret = secret.replace(/\s+/g, "").toUpperCase();
-  if (/^\d{6}$/.test(secret)) {
-    throw new Error("That looks like a 6-digit code, not the base32 seed it is generated from");
-  }
-  if (!/^[A-Z2-7]+=*$/.test(secret) || secret.length < 16) {
-    throw new Error("mfaSecret must be a base32 seed (A-Z and 2-7, 16+ characters)");
-  }
-  return secret;
-}
-
-/** Current 6-digit code for a base32 seed. */
-export async function totpCode(secret: string): Promise<string> {
-  const { TOTP, Secret } = await import("otpauth");
-  return new TOTP({ secret: Secret.fromBase32(normaliseTotpSecret(secret)), digits: 6, period: 30 }).generate();
-}
-
 export interface LoginOptions {
-  /** Show the browser and let the user drive. Required for non-TOTP tenants. */
-  interactive?: boolean;
-  secretsFile?: string;
   cacheFile?: string;
   timeoutMs?: number;
   onStatus?: (message: string) => void;
@@ -124,19 +43,13 @@ export interface LoginOptions {
  */
 export async function login(options: LoginOptions = {}): Promise<string> {
   const status = options.onStatus ?? (() => {});
-  const secrets = loadSecrets(options.secretsFile);
-  const interactive = options.interactive ?? !secrets?.mfaSecret;
-
-  if (!interactive && !secrets) {
-    throw new Error(
-      `No credentials at ${options.secretsFile ?? SECRETS_FILE}. Create it with { "email", "password", "mfaSecret" }, or sign in interactively with --interactive.`,
-    );
-  }
 
   const { PublicClientApplication, CryptoProvider } = await import("@azure/msal-node");
   const app = new PublicClientApplication({
     auth: { clientId: CLIENT_ID, authority: AUTHORITY },
     cache: { cachePlugin: createCachePlugin(options.cacheFile) },
+    // Token traffic can only reach login.microsoftonline.com (see egress.ts).
+    system: { networkClient: createGuardedNetworkClient() },
   });
 
   // PKCE: the verifier stays here, only its hash goes to the authorize endpoint.
@@ -146,11 +59,11 @@ export async function login(options: LoginOptions = {}): Promise<string> {
     redirectUri: REDIRECT_URI,
     codeChallenge: challenge,
     codeChallengeMethod: "S256",
-    prompt: interactive ? "select_account" : undefined,
+    prompt: "select_account",
   });
 
-  status(interactive ? "Opening a browser window — complete sign-in there." : "Signing in…");
-  const code = await captureAuthCode(authUrl, { ...options, interactive, secrets });
+  status("Opening a browser window — complete sign-in there.");
+  const code = await captureAuthCode(authUrl, options);
 
   const result = await app.acquireTokenByCode({
     code,
@@ -162,13 +75,10 @@ export async function login(options: LoginOptions = {}): Promise<string> {
   return result?.account?.username ?? "signed in";
 }
 
-/** Drive a browser to the authorize endpoint and pull the code off the redirect. */
-async function captureAuthCode(
-  authUrl: string,
-  options: LoginOptions & { interactive: boolean; secrets?: Secrets },
-): Promise<string> {
+/** Open a visible browser on the authorize endpoint and pull the code off the redirect. */
+async function captureAuthCode(authUrl: string, options: LoginOptions): Promise<string> {
   const playwright = await importPlaywright();
-  const timeout = options.timeoutMs ?? (options.interactive ? 600_000 : 120_000);
+  const timeout = options.timeoutMs ?? 600_000;
 
   ensurePrivateDir(CONFIG_DIR);
   // A persistent profile keeps AAD's device cookies, so repeat logins are quiet and
@@ -178,7 +88,8 @@ async function captureAuthCode(
   ensurePrivateDir(profileDir);
 
   const context = await playwright.chromium.launchPersistentContext(profileDir, {
-    headless: !options.interactive,
+    headless: false,
+    ...(process.env.M365_BROWSER_CHANNEL ? { channel: process.env.M365_BROWSER_CHANNEL } : {}),
     executablePath: process.env.CHROMIUM_PATH || undefined,
     locale: process.env.M365_LOGIN_LOCALE || "en-GB",
     timezoneId: process.env.M365_LOGIN_TIMEZONE || undefined,
@@ -210,62 +121,38 @@ async function captureAuthCode(
       /* navigation may be interrupted by the redirect we are racing for */
     });
 
-    if (!options.interactive && options.secrets) {
-      await fillCredentials(page, options.secrets, options.onStatus ?? (() => {}));
-    }
-
     return await code;
   } finally {
     await context.close().catch(() => {});
   }
 }
 
-/** Walk the converged AAD form: email, password, then the TOTP code. */
-async function fillCredentials(page: any, secrets: Secrets, status: (message: string) => void): Promise<void> {
-  status("Entering credentials…");
-  await fillVerified(page, 'input[name="loginfmt"]', secrets.email);
-  await page.click("#idSIButton9").catch(() => page.keyboard.press("Enter"));
-
-  await page.waitForSelector('input[name="passwd"]', { timeout: 30_000 });
-  await fillVerified(page, 'input[name="passwd"]', secrets.password);
-  await page.click("#idSIButton9").catch(() => page.keyboard.press("Enter"));
-
-  if (!secrets.mfaSecret) return;
-
-  const otc = await page.waitForSelector('input[name="otc"]', { timeout: 30_000 }).catch(() => null);
-  if (!otc) return;
-
-  status("Entering the MFA code…");
-  await fillVerified(page, 'input[name="otc"]', await totpCode(secrets.mfaSecret));
-  await page.click("#idSubmit_SAOTCC_Continue").catch(() => page.keyboard.press("Enter"));
-}
-
 /**
- * Fill a field and check the value actually landed.
+ * Load Playwright from **this checkout's own** `node_modules`, nowhere else.
  *
- * The converged login page keeps hidden duplicate `<input type=password>` nodes, and
- * a naive fill can target a stale hidden one and submit an empty password — which
- * AAD reports as bad credentials.
+ * A bare `import("playwright")` walks every `node_modules` in every parent directory, so
+ * a package planted anywhere up the tree would run during sign-in. Resolution is pinned
+ * to the checkout (the directory above `dist/`, or above `src/` in tests) and the result
+ * must really live inside it.
  */
-async function fillVerified(page: any, selector: string, value: string): Promise<void> {
-  const field = page.locator(`${selector}:visible`).first();
-  await field.waitFor({ state: "visible", timeout: 30_000 });
-  await field.fill(value);
-  const landed = await field.inputValue();
-  if (landed !== value) {
-    log.warn(`value did not land in ${selector}, retrying`);
-    await field.fill("");
-    await field.type(value, { delay: 20 });
-    if ((await field.inputValue()) !== value) throw new Error(`Could not fill ${selector} on the sign-in page`);
-  }
-}
-
 async function importPlaywright(): Promise<any> {
+  const checkout = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const requireFromCheckout = createRequire(join(checkout, "package.json"));
+  let entry: string;
   try {
-    return await import("playwright");
+    entry = requireFromCheckout.resolve("playwright");
   } catch {
     throw new Error(
-      "Playwright is not installed. It is an optional peer dependency, deliberately not pulled in by the plugin itself — install it alongside this CLI with `npm i -g playwright && npx playwright install chromium`, or set CHROMIUM_PATH to an existing browser.",
+      "Playwright is not installed in this checkout. It is an optional peer dependency, deliberately not pulled in by the plugin itself. " +
+        "From the checkout directory run `npm i --no-save --ignore-scripts playwright`, then either point it at a browser you already " +
+        "have (M365_BROWSER_CHANNEL=msedge or chrome, or CHROMIUM_PATH=/path/to/browser) or download Playwright's Chromium explicitly " +
+        "with `npx playwright install chromium`.",
     );
   }
+  const root = realpathSync(checkout);
+  const real = realpathSync(entry);
+  if (!real.startsWith(`${root}${sep}`)) {
+    throw new Error(`Refusing to load Playwright from ${real}: it must be installed inside this checkout (${root}).`);
+  }
+  return requireFromCheckout("playwright");
 }

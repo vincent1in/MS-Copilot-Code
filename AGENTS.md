@@ -2,6 +2,29 @@
 
 Working notes for agents and humans editing this repo.
 
+## Fork rules (safety-reviewed fork — read first)
+
+This repo is a reviewed fork; [SECURITY_REVIEW.md](SECURITY_REVIEW.md) is the source of
+truth for why. Changes must keep these properties, and any change that touches them is a
+security review event, not a routine edit:
+
+1. **Egress allowlist.** Every outbound request goes through `assertEgress` (or, for MSAL,
+   `createGuardedNetworkClient`) in `src/egress.ts`. Do not add a destination, a scheme, a
+   port, or a request path that bypasses it.
+2. **No network in tests or CI.** The suite runs with `test/net-guard.setup.ts`; CI preloads
+   `scripts/net-guard.cjs` into every Node process. Do not weaken either.
+3. **Nothing from npm at run time.** The package stays `private`, `setup` writes a local path,
+   dependencies are exact-pinned, `.npmrc` keeps `ignore-scripts=true`. A new runtime
+   dependency must be bundled, reviewed, and added to `packaging.test.ts`.
+4. **Interactive sign-in only.** Never reintroduce stored passwords, TOTP seeds or headless
+   credential entry.
+5. **No tenant side effects by default.** The Copilot Studio agent stays opt-in
+   (`studioAgent` / `M365_STUDIO_AGENT=1`); `doctor` stays read-only.
+6. **Opt-in data sharing.** Bing web search stays opt-in (`webSearch` / `M365_WEB_SEARCH=1`);
+   no mailbox-grounded models.
+7. **Tokens never reach logs** — everything written by `log.ts` or the turn log passes `redact()`.
+8. **CI** stays read-only, secret-free, with actions pinned to commit SHAs.
+
 ## What this is
 
 An opencode plugin that makes Microsoft 365 Copilot usable as opencode's model backend.
@@ -37,7 +60,8 @@ do not silently move the logic back.
 | `src/session.ts` | SignalR over WebSocket: framing, the mandatory Metrics frame, ping, stop, Disengaged |
 | `src/auth.ts` | MSAL silent refresh. **Never opens a browser** |
 | `src/login.ts` | The browser sign-in. CLI-only, Playwright is an optional dependency |
-| `src/agent.ts` | Copilot Studio declarative agent: discovery, create, publish, hash-versioning |
+| `src/agent.ts` | Copilot Studio declarative agent (opt-in): discovery, create, publish, hash-versioning |
+| `src/egress.ts` | The outbound allowlist, and MSAL's guarded network client |
 | `src/fenced.ts` | The fenced tool-call contract, both directions, plus the hardening layers |
 | `src/image.ts` | Image input: collect `image_url` parts, upload to M365, build the annotation |
 | `src/translate.ts` | OpenAI ⇄ M365: conversation pooling, delta sends, prompt condensing, streaming |
