@@ -57,7 +57,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vincent1in/opencode-m365-copilot.git"
+    "url": "git+https://github.com/vincent1in/MS-Copilot-Code.git"
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.0",

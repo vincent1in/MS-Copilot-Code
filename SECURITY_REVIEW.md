@@ -213,6 +213,20 @@ These cannot be fixed in code. Decide on them deliberately.
 | Our source | 93 files. No bidirectional, invisible or format characters; the non-ASCII is typographic (dashes, arrows, ellipses). No `eval`, `new Function`, `vm` or obfuscation. base64 appears only in JWT claims, image data URLs and random keys. The longest line is prompt text. |
 | Antivirus | ClamAV installed, but the sandbox blocked its signature download (`database.clamav.net`), so **no antivirus scan was run**. Scan the zip with your own antivirus; Microsoft Defender scans downloads on Windows. |
 
+### Are the packages the real, popular ones?
+
+Each of the 306 installed packages was looked up on registry.npmjs.org. npm's download-stats API is blocked in the sandbox, but the registry's search results carry the same weekly counts. For each package the check took weekly downloads, dependents, the account that published the installed version, the repository, publish dates, and any name one or two edits away from a much more downloaded package.
+
+| Check | Result |
+|---|---|
+| What ships (the 19 packages bundled into `dist/`, plus Playwright) | All long-established, from the projects you'd expect, at 30M to 1.2B downloads a week. Microsoft's MSAL (`@azure/msal-node`, `@azure/msal-common`) is published by Microsoft's `azuread` account. `ws` is published by its maintainer `lpinca`. `zod` and `playwright` come through GitHub Actions trusted publishing from `colinhacks/zod` and `microsoft/playwright`. Then `jsonwebtoken` (auth0), `jws`, `jwa`, the `lodash.*` single-function packages (jdalton), `ms` (vercel), `semver` (npm), `safe-buffer`, `buffer-equal-constant-time` and `ecdsa-sig-formatter`. |
+| Popularity, all 306 | 272 have at least 10M downloads a week, 26 have 1M–10M and 5 have 100k–1M. None are below 100k. The five are OpenCode's own `@opencode/plugin`, `/ai` and `/util` (about 0.6M a week, first published September 2026), and `yuku` with its Linux binary (0.4M–0.7M, a parser that `tsdown` uses). |
+| Not in npm's search | Three packages, because search hides deprecated ones. `@opentelemetry/sdk-trace-base` and `-node` are OpenTelemetry's official packages, now replaced by `@opentelemetry/sdk-trace`. `node-domexception` is jimmywarting's, used by `node-fetch`. All three are dev-only. |
+| Look-alike names | One pair: `just-diff` (8.7M a week, angus-c/just) next to `jest-diff` (97M). They are two genuine, unrelated projects. |
+| No repository listed | `@isaacs/nonrecursive-glob-match` and `promise-all-reject-late`, both published by `isaacs` (npm's creator). |
+| Deprecated | The three above, and `postcss-selector-parser` 7.2.0, whose fix is in 7.2.1. All are dev-only. |
+| Where the 306 come from | `@opencode/plugin`, which this code uses only for its TypeScript types, brings in 238 of them: AWS SDK, a Redis client, npm's installer libraries, OpenTelemetry, `effect`. They are installed by `npm ci` in a source checkout, never run during install (`ignore-scripts`), and none ship. The rest come from vitest (38), tsdown (28), MSAL (17) and the remaining few. |
+
 **Residual:**
 
 1. Edge's own background traffic was not measured. Run `node dist/cli.mjs doctor --browser` with Edge.
@@ -223,7 +237,7 @@ These cannot be fixed in code. Decide on them deliberately.
 ## Re-verify it yourself
 
 ```sh
-git clone https://github.com/vincent1in/opencode-m365-copilot.git && cd opencode-m365-copilot
+git clone https://github.com/vincent1in/MS-Copilot-Code.git && cd MS-Copilot-Code
 npm ci --ignore-scripts
 npm audit --omit=dev && npm audit signatures
 

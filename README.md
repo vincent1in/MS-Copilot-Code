@@ -106,8 +106,8 @@ opencode ──OpenAI /v1──▶ in-process proxy ──SignalR/WS──▶ M3
 Needs Node 22+ and git. Every step says what it downloads.
 
 ```sh
-git clone https://github.com/vincent1in/opencode-m365-copilot.git
-cd opencode-m365-copilot
+git clone https://github.com/vincent1in/MS-Copilot-Code.git
+cd MS-Copilot-Code
 npm ci --ignore-scripts      # exactly the locked versions from registry.npmjs.org, Playwright included; no install scripts
 npm test                     # typecheck + suite, with all non-loopback network blocked
 npm run build                # writes dist/
