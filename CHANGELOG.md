@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.3.0 (this fork, 2026-11-12)
+
+This fork's first release, on top of upstream 2.2.1. [SECURITY_REVIEW.md](SECURITY_REVIEW.md) has the reasons and the checks behind each change.
+
+### Features
+
+* **A page that sets it up and shows every turn.** `opencode-m365 start` (or `start.sh`, `start.cmd`) opens a page on this computer with four tabs: Set up (sign in, send a test message, connect OpenCode), Traffic, Checks and Settings.
+* **Every setting is on the page**, saved in `settings.json`. Plugin options and environment variables still take precedence, and the page says where a setting is set.
+* **Work IQ check on every turn.** A reply Copilot drew from your work data is held back by default.
+* **`doctor --browser`** lists what the sign-in browser contacts by itself, refusing all of it.
+* **A release zip** with the built gateway, Playwright for the sign-in window, the source and checksums. It needs no npm.
+
+### Security and privacy
+
+* Outbound connections are allowlisted in code to two hosts, `login.microsoftonline.com` and `substrate.office.com`. CI builds and tests with no network route.
+* The Copilot Studio agent is removed, so nothing is created in your tenant.
+* Sign-in is interactive only; the stored password and TOTP seed are gone.
+* Bing web search is off by default, and the mailbox-grounded `work` models are removed.
+* The Microsoft sign-in library's details about itself and your machine are stripped from sign-in and token requests.
+* The sign-in browser's own Google services (account check, push messaging, component updates) are switched off.
+* `setup` registers this folder, never an npm package, and no longer adds a `$schema` link that editors would fetch.
+* `.npmrc` runs no install scripts and turns off npm's update notifier, funding notices and audit report.
+
+### Changed
+
+* The default model is `m365/gpt-6.1-sol`.
+* A held reply's error message now points to the page's Settings.
+
 ## [2.2.1](https://github.com/chrischall/opencode-copilot-plugin/compare/v2.2.0...v2.2.1) (2026-11-10)
 
 

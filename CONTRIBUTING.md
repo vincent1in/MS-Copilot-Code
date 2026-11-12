@@ -42,8 +42,8 @@ title. Make the two match, or add a second commit so the title wins.
   `config.tools`, `experimental.chat.system.transform` and `agent.<name>.prompt` were all
   measured non-functional in opencode 1.18.18. If you re-test on a newer version and one
   works, update the README rather than silently relocating the logic.
-- **Never delete a Copilot Studio agent.** Another host on the tenant may be mid
-  conversation with it.
+- **Nothing that changes the tenant.** This fork removed upstream's Copilot Studio agent;
+  keep it that way.
 - **Never log an access token.** `M365_TRACE=1` dumps full frames, which is why it is
   opt-in and documented as sensitive.
 

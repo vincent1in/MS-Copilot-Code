@@ -13,7 +13,9 @@ Your Microsoft 365 credentials and the access tokens derived from them. Specific
   Entra device/SSO cookies, used by the interactive sign-in window.
 - `~/.config/opencode-copilot/debug.log` — written only under `M365_DEBUG`/`M365_TRACE`.
   Every line passes through `redact()` (access tokens, bearer headers, JWTs, token fields).
-- `~/.config/opencode-copilot/agent-id.json` — only if you opt in to the Copilot Studio agent.
+- `~/.config/opencode-copilot/settings.json` — the page's settings. No credentials.
+- `~/.config/opencode-copilot/monitor/` — while a gateway with a page runs, its page link
+  (which carries the page's key). Deleted when the gateway stops.
 
 This fork never reads or writes a `secrets.json`. Upstream's automated sign-in kept a
 password and TOTP seed there; if an old copy is on disk, `opencode-m365 doctor` warns you
@@ -30,14 +32,19 @@ Enforced in code by `src/egress.ts` (TLS, port 443, exact hosts, per purpose):
 |---|---|---|
 | Sign-in / token refresh (MSAL) | `login.microsoftonline.com` | `login`, and silent refresh |
 | Chat and image upload | `substrate.office.com` | every model turn |
-| Copilot Studio agent | `api.bap.microsoft.com`, `*.environment.api.powerplatform.com` | only with `studioAgent: true` / `M365_STUDIO_AGENT=1` |
+
+Nothing else: no analytics, no update checks, no downloads. Upstream's Copilot Studio
+agent, and the Power Platform hosts it used, are removed.
 
 Redirects are never followed (a hop would otherwise go unchecked). The `baseUrl` option,
 for pointing the plugin at an already-running proxy, is accepted only for a loopback
 address: opencode sends every prompt to it.
 
 The sign-in browser window is outside that guard: it shows Microsoft's (or your IdP's)
-sign-in pages and loads whatever they reference.
+sign-in pages and loads whatever they reference. The browser's own background services
+(for Chrome: Google's account check, push messaging and component updates) are pointed at a
+closed local port; `opencode-m365 doctor --browser` lists anything your browser still
+tries to contact by itself.
 
 Nothing is loaded from outside this checkout: the bundle's only runtime `require`s are
 Node built-ins (ws's optional native add-ons are stubbed out), and `login` loads
@@ -58,6 +65,14 @@ your browser can reach `127.0.0.1` too. So the proxy also:
 
 Treat the `serve` key like a password: anything holding it can spend your Copilot quota.
 Do not run `opencode-m365 serve` on a shared host.
+
+## The page
+
+A second loopback listener serves the gateway's page. It needs a per-launch key, carried in
+the link's `#fragment` (never sent to a server) and then sent in an `Authorization` header.
+It refuses other hosts, origins and sites, sends a strict content security policy, and
+renders everything as text. It can save a setting, open a sign-in window and send one
+fixed test message; it never edits OpenCode's config. Traffic and Checks stay in memory.
 
 ## Before sharing a log
 
