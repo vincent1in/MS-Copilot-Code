@@ -22,11 +22,14 @@ security review event, not a routine edit:
    back anything that creates or changes resources in the tenant. `doctor` stays read-only.
 6. **Opt-in data sharing.** Bing web search stays opt-in (`webSearch` / `M365_WEB_SEARCH=1`);
    no mailbox-grounded models; Work IQ replies are held by default.
-7. **The page never edits OpenCode's config**, and its endpoints keep the monitor's
-   protections (key, `Host`, `Origin`, `Sec-Fetch-Site`, JSON only). `setup`, which the
-   user runs, is the one thing that writes OpenCode's config.
+7. **OpenCode's config changes only when the user asks**: the page's Connect button or
+   `setup`. Either one adds this folder (and, if asked, the three quiet keys), keeps the rest
+   of the file, saves a `.bak` first, refuses invalid JSON and never rewrites an
+   `opencode.jsonc`. The page's endpoints keep the monitor's protections (key, `Host`,
+   `Origin`, `Sec-Fetch-Site`, JSON only).
 8. **The sign-in browser stays quiet**: keep `QUIET_BROWSER_ARGS` in `src/login.ts`, and
    re-measure with `doctor --browser` when Playwright or the browser changes.
+   `scripts/sealed-network/run.sh` re-runs the whole outbound and inbound check on Linux.
 9. **Tokens never reach logs** — everything written by `log.ts` or the turn log passes `redact()`.
 10. **CI** stays read-only, secret-free, with actions pinned to commit SHAs.
 

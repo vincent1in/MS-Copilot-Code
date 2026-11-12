@@ -71,8 +71,13 @@ Do not run `opencode-m365 serve` on a shared host.
 A second loopback listener serves the gateway's page. It needs a per-launch key, carried in
 the link's `#fragment` (never sent to a server) and then sent in an `Authorization` header.
 It refuses other hosts, origins and sites, sends a strict content security policy, and
-renders everything as text. It can save a setting, open a sign-in window and send one
-fixed test message; it never edits OpenCode's config. Traffic and Checks stay in memory.
+renders everything as text. It can save a setting, open a sign-in window, send one fixed
+test message, and, when you press Connect OpenCode, add this folder to OpenCode's config
+(keeping the rest of the file and a `.bak` of it). Traffic and Checks stay in memory.
+
+Both listeners, the proxy and the page, bind to 127.0.0.1 only and refuse to start on any
+other address; a request naming any other host is refused, so a web page cannot reach them
+through DNS tricks. `scripts/sealed-network/run.sh` checks all of this on Linux.
 
 ## Before sharing a log
 

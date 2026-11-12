@@ -1,6 +1,6 @@
 {
   "name": "@vincent1in/opencode-m365-copilot",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "private": true,
   "description": "Safety-reviewed fork of opencode-m365-copilot: your org's Microsoft 365 Copilot as the model backend for opencode",
   "license": "MIT",

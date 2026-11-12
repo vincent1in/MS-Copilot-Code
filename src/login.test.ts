@@ -74,7 +74,7 @@ describe("sign-in", () => {
   it("opens the sign-in window with the browser's own background services pointed at this machine", async () => {
     const { QUIET_BROWSER_ARGS, launchOptions } = await import("./login.js");
     const options = launchOptions({ channel: "chrome" }, {});
-    expect(options).toMatchObject({ headless: false, channel: "chrome", locale: "en-GB" });
+    expect(options).toMatchObject({ headless: false, channel: "chrome", locale: "en-GB", handleSIGTERM: false, handleSIGHUP: false });
     expect(options.args).toEqual([...QUIET_BROWSER_ARGS]);
     // Google's account check, push-messaging check-in and component updates: the three
     // services measured calling out from a sign-in window on their own.

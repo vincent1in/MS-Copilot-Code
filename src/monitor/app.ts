@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import type { TokenClient } from "../auth.js";
 import { ALLOWED_HOSTS } from "../egress.js";
 import { DEFAULT_MODEL, MODELS } from "../models.js";
-import { OPENCODE_QUIET, openCodeStatus, thisCheckout, type OpenCodeStatus } from "../opencode-config.js";
+import { OPENCODE_QUIET, connectOpenCode as addToOpenCodeConfig, openCodeStatus, thisCheckout, type OpenCodeStatus } from "../opencode-config.js";
 import { gatewayCommand } from "../paths.js";
 import { SESSION_ID_HEADER } from "../server.js";
 import type { DescribedSettings, SettingsStore, SignInBrowser } from "../settings.js";
@@ -64,6 +64,10 @@ export interface AppState {
     pluginDir: string;
     /** The settings that switch off OpenCode's own outside traffic, to copy. */
     quietSettings: Record<string, unknown>;
+    /** The page can add this folder to OpenCode's config: the standalone app only. */
+    canConnect: boolean;
+    /** What the last Connect did, while this gateway runs. */
+    lastConnect?: { at: string; quiet: boolean; backupPath?: string };
   };
   /** The gateway's commands, written to run from any folder. */
   commands: { login: string; open: string; setup: string };
@@ -81,6 +85,11 @@ export interface AppController {
   /** Start signing in; progress shows in the state. */
   signIn(): Promise<AppState>;
   sendTest(model: string): Promise<TestResult>;
+  /**
+   * Add this folder to OpenCode's config, saving the previous file as `.bak`;
+   * with `quiet`, also switch off OpenCode's own update checks, sharing and web search.
+   */
+  connectOpenCode(quiet: boolean): Promise<AppState>;
   /** Called whenever the state changes. Returns the unsubscribe. */
   onChange(listener: () => void): () => void;
 }
@@ -105,6 +114,7 @@ export function createAppController(options: AppControllerOptions): AppControlle
   let signInError: string | undefined;
   let testing = false;
   let lastTest: TestResult | undefined;
+  let lastConnect: { at: string; quiet: boolean; backupPath?: string } | undefined;
 
   const notify = () => {
     for (const listener of listeners) {
@@ -137,7 +147,13 @@ export function createAppController(options: AppControllerOptions): AppControlle
       signIn: { available: Boolean(options.signIn), running: signingIn, ...(signInError ? { error: signInError } : {}), command: commands.login },
       commands,
       test: { running: testing, prompt: TEST_PROMPT, ...(lastTest ? { last: lastTest } : {}) },
-      opencode: { ...openCodeStatus(pluginDir, options.opencodeConfigPath), pluginDir, quietSettings: { ...OPENCODE_QUIET } },
+      opencode: {
+        ...openCodeStatus(pluginDir, options.opencodeConfigPath),
+        pluginDir,
+        quietSettings: { ...OPENCODE_QUIET },
+        canConnect: options.context === "app",
+        ...(lastConnect ? { lastConnect } : {}),
+      },
       settings: options.settings.describe(),
       settingsFile: options.settings.file,
       models: testModels(),
@@ -200,6 +216,13 @@ export function createAppController(options: AppControllerOptions): AppControlle
         notify();
       }
       return lastTest;
+    },
+    async connectOpenCode(quiet) {
+      if (options.context !== "app") throw new Error("OpenCode is already running this gateway, so it is connected.");
+      const result = addToOpenCodeConfig({ quiet, pluginDir, ...(options.opencodeConfigPath ? { configPath: options.opencodeConfigPath } : {}) });
+      lastConnect = { at: new Date().toISOString(), quiet, ...(result.backupPath ? { backupPath: result.backupPath } : {}) };
+      notify();
+      return state();
     },
     onChange(listener) {
       listeners.add(listener);

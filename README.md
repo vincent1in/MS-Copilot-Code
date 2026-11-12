@@ -29,17 +29,20 @@ You need:
 - Microsoft Edge or Google Chrome, for the sign-in window;
 - a work or school account with Microsoft 365 Copilot Chat.
 
-1. **Download** `opencode-m365-copilot-2.3.0.zip` and `opencode-m365-copilot-2.3.0.zip.sha256`.
-   Check the zip: `shasum -a 256 -c opencode-m365-copilot-2.3.0.zip.sha256` on macOS and Linux,
-   or `Get-FileHash opencode-m365-copilot-2.3.0.zip` in PowerShell on Windows, compared with the
+1. **Download** `opencode-m365-copilot-2.4.0.zip` and `opencode-m365-copilot-2.4.0.zip.sha256`.
+   Check the zip: `shasum -a 256 -c opencode-m365-copilot-2.4.0.zip.sha256` on macOS and Linux,
+   or `Get-FileHash opencode-m365-copilot-2.4.0.zip` in PowerShell on Windows, compared with the
    `.sha256` file. Unzip it somewhere it can stay: OpenCode loads the gateway from this folder.
 2. **Start the page.** In that folder, run `sh start.sh` (macOS, Linux) or double-click
    `start.cmd` (Windows). The gateway's page opens in your browser.
 3. **Follow Set up** on the page:
    1. *Sign in to Microsoft 365.* A browser window opens on Microsoft's sign-in page.
    2. *Send a test message.* You see the exact text that went to Copilot, and its reply.
-   3. *Connect OpenCode.* Add the folder to `plugins` in OpenCode's config file. The page
-      shows the file, the lines to add and copy buttons. It never edits the file itself.
+   3. *Connect OpenCode.* Press **Connect OpenCode**. It adds this folder to `plugins` in
+      OpenCode's config file and changes nothing else in it, saving the file as it was to
+      `opencode.json.bak` first. Leave the box ticked to also turn off OpenCode's own update
+      checks, session sharing and web search. To do it by hand instead, open
+      *Or add it yourself*.
 4. **Start OpenCode** in your project with `opencode`. The gateway's models are listed as
    `m365/…`, and `m365/gpt-6.1-sol` is used when you don't pick one.
 
@@ -72,8 +75,42 @@ organization's Edge policies. To check your own browser, run `node dist/cli.mjs 
 it opens the sign-in browser on an empty page for a minute and lists everything it tries to
 contact by itself, refusing all of it.
 
-**The page** is served on 127.0.0.1 only, and Traffic and Checks stay in memory. The only
-file it writes is your settings, `~/.config/opencode-copilot/settings.json`.
+**Local only.** The gateway and its page listen on 127.0.0.1 and refuse to start on any
+other address, so nothing on your network can reach them. A request naming any other host
+is refused too, so a web page can't reach them through DNS tricks either. The page's
+Traffic and Checks stay in memory. The page writes your settings
+(`~/.config/opencode-copilot/settings.json`), and OpenCode's config only when you press
+Connect OpenCode.
+
+**Checked four ways.** `scripts/sealed-network/run.sh` (Linux, as root) runs the gateway in
+a sealed network whose only way out is a virtual cable to a recorder. The recorder answers
+every name lookup with itself and logs every lookup, connection and TLS server name. The
+same run records every connection attempt in Node and every network system call (strace),
+and probes every port the gateway listens on from outside. The run covered:
+
+- not signed in: help, doctor, setup, the page, a setting, Connect and a test message;
+- the gateway as OpenCode loads it;
+- signed in, with a fresh token and with an expired one;
+- the sign-in window, open for 45 seconds.
+
+| What ran | What left the machine |
+|---|---|
+| Not signed in: every command and the whole page, including Connect | **nothing** |
+| Inside OpenCode, without signing in | **nothing** |
+| A test message, signed in | one lookup of, and one TLS connection to, `substrate.office.com` |
+| The same, with an expired token | one lookup of, and one TLS connection to, `login.microsoftonline.com` |
+| The sign-in window (Chrome) | only `login.microsoftonline.com` |
+| Connecting to the gateway from outside | refused on every port |
+
+All four records agree on every row. Nothing else was looked up or contacted.
+
+To watch it yourself on any system, start the gateway with Node's recorder:
+`NODE_OPTIONS="--require ./scripts/net-guard.cjs" NET_GUARD_LOG=net.jsonl node dist/cli.mjs start`.
+In PowerShell, run `$env:NODE_OPTIONS="--require ./scripts/net-guard.cjs"; $env:NET_GUARD_LOG="net.jsonl"`
+and then `node dist/cli.mjs start`. Every connection attempt is then written to `net.jsonl`. To check what it listens on, run
+`lsof -iTCP -sTCP:LISTEN -P | grep node` on macOS and Linux, or
+`Get-NetTCPConnection -State Listen -OwningProcess (Get-Process node).Id` in PowerShell.
+Only `127.0.0.1` should appear.
 
 **OpenCode itself** is not covered by this review and has its own outside traffic. Its config
 switches some of it off; these are the page's optional lines: `"update": "disable"` (update
@@ -414,8 +451,10 @@ owner-only file under `~/.config/opencode-copilot/monitor/`. The file holds the 
 anything the page shows, and is deleted when the gateway stops.
 
 The page can also change things: save a setting, start a sign-in window, send the test
-message. Those need the same key, take JSON only, and the page never edits OpenCode's
-config.
+message, and add this folder to OpenCode's config when you press Connect OpenCode. Those
+need the same key and take JSON only. Connect keeps the rest of OpenCode's config, saves a
+`.bak` first, refuses a file that isn't valid JSON, and never rewrites an `opencode.jsonc`
+(comments would be lost); then it shows the lines to add by hand.
 
 ## Work IQ (your work data)
 

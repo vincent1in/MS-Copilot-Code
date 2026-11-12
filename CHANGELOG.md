@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.4.0 (this fork, 2026-11-12)
+
+### Features
+
+* **Connect OpenCode** on the Set up page. It adds this folder to OpenCode's config and can also switch off OpenCode's own update checks, session sharing and web search. It keeps everything else in the file and saves a `.bak` first. It never rewrites an `opencode.jsonc`. The by-hand steps are still there.
+* **`scripts/sealed-network/run.sh`** checks what leaves the machine four ways on Linux: the cable, a DNS and TLS name recorder, strace, and Node's own recorder. It also checks that nothing can connect in from outside.
+
+### Fixes
+
+* A stop signal ends `login` at once, even while the sign-in browser keeps retrying a connection. `start` always exits within 3 s of being asked to stop.
+
 ## 2.3.0 (this fork, 2026-11-12)
 
 This fork's first release, on top of upstream 2.2.1. [SECURITY_REVIEW.md](SECURITY_REVIEW.md) has the reasons and the checks behind each change.
