@@ -42,4 +42,7 @@ export default defineConfig({
     bufferutil: noOptionalNative,
     "utf-8-validate": noOptionalNative,
   },
+  // The gateway monitor's page: static files served from `dist/ui/` (read once at
+  // startup by src/monitor/server.ts, which resolves them beside its own bundle).
+  copy: [{ from: ["src/monitor/ui/index.html", "src/monitor/ui/monitor.css", "src/monitor/ui/monitor.js"], to: "dist/ui" }],
 });

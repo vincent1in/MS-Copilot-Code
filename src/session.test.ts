@@ -448,3 +448,45 @@ describe("cancellation", () => {
     await expect(sessionFor(stub).run("hi", { signal: AbortSignal.abort() })).rejects.toThrow(/abort/i);
   });
 });
+
+describe("the turn observer", () => {
+  it("sees the request as sent, without the token", async () => {
+    stub = await startStubCopilot();
+    const sent: any[] = [];
+    await sessionFor(stub).run("hello there", { observer: { sent: (frame) => sent.push(frame) } });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].argument).toEqual(chatFrame(stub).arguments[0]);
+    expect(sent[0].path).toBe("/m365Copilot/Chathub/aaaa-oid@bbbb-tid");
+    expect(sent[0].params).not.toHaveProperty("access_token");
+    expect(sent[0].params.scenario).toBe("OfficeWebIncludedCopilot");
+    expect(JSON.stringify(sent)).not.toContain(fakeToken().split(".")[1]);
+  });
+
+  it("sees each control message once, and the answer's sources", async () => {
+    const search = { author: "bot", messageType: "InternalSearchQuery", messageId: "m1", text: "Searching", invocation: "search_web(q)" };
+    stub = await startStubCopilot({
+      respond: () => [
+        { type: 1, target: "update", arguments: [{ messages: [search] }] },
+        { type: 1, target: "update", arguments: [{ messages: [search, { author: "bot", messageType: "Progress", text: "Reading" }] }] },
+        botMessage("Answer", { sourceAttributions: [{ seeMoreUrl: "https://example.org/a" }] }),
+        streamItem("Answer", { sourceAttributions: [{ seeMoreUrl: "https://example.org/a" }, { seeMoreUrl: "https://example.org/b" }] }),
+        completion(),
+      ],
+    });
+    const control: any[] = [];
+    const sources: unknown[][] = [];
+    const result = await sessionFor(stub).run("q", { observer: { control: (message) => control.push(message), sources: (list) => sources.push(list) } });
+    expect(result.text).toBe("Answer");
+    expect(control.map((message) => message.messageType)).toEqual(["InternalSearchQuery", "Progress"]);
+    expect(sources).toEqual([[{ seeMoreUrl: "https://example.org/a" }], [{ seeMoreUrl: "https://example.org/b" }]]);
+  });
+
+  it("cannot break a turn by throwing", async () => {
+    stub = await startStubCopilot();
+    const boom = () => {
+      throw new Error("observer bug");
+    };
+    const result = await sessionFor(stub).run("hi", { observer: { sent: boom, control: boom, sources: boom } });
+    expect(result.text).toBe("Hello world");
+  });
+});

@@ -1,0 +1,762 @@
+/*
+ * Gateway monitor. One idea carries the page: the border. Each turn is laid out as a
+ * ledger split by a double rule — this machine on the left, Microsoft 365 on the
+ * right — so anything shown on the right is something that has left the machine.
+ * Everything else stays quiet; colour is spent only on what needs attention.
+ */
+
+:root {
+  --paper: #f3f5f7;
+  --surface: #ffffff;
+  --ink: #1a1d21;
+  --muted: #5b6470;
+  --rule: #d5dbe2;
+  --remote: #e8eef8;
+  --line: #2b3a8c;
+  --on-line: #ffffff;
+  --ok: #1d7a4e;
+  --warn: #8f5400;
+  --warn-bg: #fff3dc;
+  --stop: #b42318;
+  --stop-bg: #fde9e7;
+  --mark: #ffe28f;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-head: "Bahnschrift", "DIN Alternate", "D-DIN", "Barlow", "Roboto Condensed", var(--font-ui);
+  --font-code: ui-monospace, "Cascadia Mono", "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --gutter: 28px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #16191e;
+    --surface: #1d2128;
+    --ink: #e5e8ec;
+    --muted: #9aa3af;
+    --rule: #2e343d;
+    --remote: #1c2533;
+    --line: #8fa1ff;
+    --on-line: #10131a;
+    --ok: #5ccf96;
+    --warn: #f2b65a;
+    --warn-bg: #3a2c12;
+    --stop: #ff8a7f;
+    --stop-bg: #3d1d1b;
+    --mark: #6b5513;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Layout rules below set display on sections; hidden must still win. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1.45 var(--font-ui);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-head);
+  font-weight: 600;
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--muted);
+}
+
+button[aria-pressed="true"] {
+  background: var(--line);
+  border-color: var(--line);
+  color: var(--on-line);
+}
+
+:focus-visible {
+  outline: 2px solid var(--line);
+  outline-offset: 2px;
+}
+
+/* --- masthead --------------------------------------------------------------------- */
+
+.masthead {
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+  padding: 14px 20px 12px;
+}
+
+.masthead-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+}
+
+h1 {
+  font-size: 20px;
+  letter-spacing: 0.01em;
+}
+
+.link-state {
+  margin: 0;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.link-state::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.link-state[data-state="live"]::before {
+  background: var(--ok);
+}
+
+.link-state[data-state="paused"]::before {
+  background: var(--warn);
+}
+
+.link-state[data-state="stopped"]::before,
+.link-state[data-state="refused"]::before {
+  background: var(--stop);
+}
+
+.controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.follow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  margin-right: 6px;
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin: 10px 0 0;
+}
+
+.facts div {
+  display: flex;
+  gap: 6px;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* --- views ------------------------------------------------------------------------ */
+
+.views {
+  display: flex;
+  gap: 2px;
+  padding: 0 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+}
+
+.view {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  padding: 8px 10px 6px;
+  color: var(--muted);
+}
+
+.view[aria-current="page"] {
+  color: var(--ink);
+  border-bottom-color: var(--line);
+  font-weight: 600;
+}
+
+/* --- turns: list and detail ---------------------------------------------------------- */
+
+.turns-view {
+  display: grid;
+  grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.turn-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--rule);
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  overflow-y: auto;
+  min-height: 60vh;
+}
+
+.turn-list:empty::after {
+  content: "No turns yet.";
+  display: block;
+  padding: 14px;
+  color: var(--muted);
+}
+
+.turn-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1px 8px;
+  padding: 8px 12px 9px 14px;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+}
+
+.turn-row:hover {
+  background: var(--paper);
+}
+
+.turn-row[aria-selected="true"] {
+  background: var(--paper);
+  box-shadow: inset 3px 0 0 var(--line);
+}
+
+.turn-row.arrived {
+  animation: arrive 1.4s ease-out;
+}
+
+@keyframes arrive {
+  from {
+    background: var(--remote);
+  }
+}
+
+.row-what {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-what.local-only {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.row-meta {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 10px;
+}
+
+.row-flags {
+  display: flex;
+  gap: 4px;
+  align-items: start;
+}
+
+.flag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.flag.stop {
+  color: var(--stop);
+  background: var(--stop-bg);
+}
+
+.flag.warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.turn {
+  padding: 18px 24px 48px;
+  min-width: 0;
+}
+
+.empty {
+  color: var(--muted);
+  max-width: 60ch;
+  padding-top: 24px;
+}
+
+.empty h2 {
+  color: var(--ink);
+  font-size: 17px;
+  margin-bottom: 6px;
+}
+
+.turn-head h2 {
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.turn-meta {
+  margin: 4px 0 16px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 14px;
+}
+
+/* --- the ledger: this machine | the border | Microsoft 365 ---------------------------- */
+
+.ledger {
+  background:
+    linear-gradient(var(--line), var(--line)) calc(50% - 3px) 0 / 2px 100% no-repeat,
+    linear-gradient(var(--line), var(--line)) calc(50% + 3px) 0 / 2px 100% no-repeat,
+    linear-gradient(var(--remote), var(--remote)) 100% 0 / calc(50% - var(--gutter) / 2) 100% no-repeat;
+  padding-bottom: 6px;
+}
+
+.step,
+.ledger-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--gutter) minmax(0, 1fr);
+}
+
+.ledger-head {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.ledger-head span {
+  padding: 8px 12px 4px 0;
+}
+
+.ledger-head span:last-child {
+  padding-left: 14px;
+}
+
+.entry {
+  grid-row: 1;
+  min-width: 0;
+  padding: 10px 14px 12px 0;
+}
+
+.entry.remote {
+  grid-column: 3;
+  padding: 10px 14px 12px 14px;
+}
+
+.entry.local {
+  grid-column: 1;
+}
+
+.entry h3 {
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.cross {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: center;
+  align-self: start;
+  margin-top: 10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--line);
+  color: var(--on-line);
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.note {
+  color: var(--muted);
+  margin: 6px 0 0;
+  max-width: 78ch;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 14px;
+  margin: 0 0 8px;
+}
+
+.kv dt {
+  color: var(--muted);
+}
+
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.message {
+  margin: 10px 0 0;
+}
+
+.message-label {
+  font-weight: 600;
+  margin: 0;
+}
+
+.message-label span {
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 6px;
+}
+
+.payload {
+  font: 12.5px/1.5 var(--font-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 9px 11px;
+  margin: 4px 0 0;
+  tab-size: 4;
+}
+
+.payload.clipped {
+  max-height: 28em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 82%, transparent);
+  mask-image: linear-gradient(#000 82%, transparent);
+}
+
+.payload mark {
+  background: var(--mark);
+  color: inherit;
+  outline: 1px solid var(--warn);
+}
+
+.payload-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.payload-tools button {
+  font-size: 12px;
+  padding: 1px 8px;
+}
+
+details {
+  margin-top: 8px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.callout {
+  border-left: 3px solid var(--muted);
+  padding: 7px 12px;
+  margin: 6px 0 0;
+  max-width: 80ch;
+  background: var(--surface);
+}
+
+.callout.stop {
+  border-left-color: var(--stop);
+  background: var(--stop-bg);
+}
+
+.callout.warn {
+  border-left-color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.callout strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.activity {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.activity li {
+  padding: 4px 0;
+  border-top: 1px solid var(--rule);
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0 10px;
+}
+
+.activity li:first-child {
+  border-top: 0;
+}
+
+.activity .what {
+  color: var(--muted);
+}
+
+.activity .said {
+  overflow-wrap: anywhere;
+}
+
+.ground {
+  font-weight: 600;
+}
+
+.ground.work {
+  color: var(--stop);
+}
+
+.ground.unknown {
+  color: var(--warn);
+}
+
+.call {
+  margin-top: 6px;
+}
+
+.call-name {
+  font-family: var(--font-code);
+  font-weight: 600;
+}
+
+/* --- checks --------------------------------------------------------------------------- */
+
+.turn-checks {
+  margin-top: 22px;
+  max-width: 100ch;
+}
+
+.turn-checks h3 {
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.check-list > li {
+  display: grid;
+  grid-template-columns: 6.5em minmax(0, 1fr);
+  gap: 0 12px;
+  padding: 6px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.verdict {
+  font-weight: 600;
+}
+
+.verdict.allowed {
+  color: var(--ok);
+}
+
+.verdict.denied,
+.verdict.held {
+  color: var(--stop);
+}
+
+.verdict.flagged {
+  color: var(--warn);
+}
+
+.verdict.info {
+  color: var(--muted);
+}
+
+.check-what {
+  color: var(--muted);
+  margin-right: 6px;
+}
+
+.findings {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.findings li {
+  padding: 1px 0;
+}
+
+.findings code {
+  font-family: var(--font-code);
+  color: var(--ink);
+}
+
+.checks-view {
+  padding: 4px 20px 32px;
+}
+
+.check-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+}
+
+.check-table caption {
+  text-align: left;
+  padding: 12px 0 8px;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.check-table th,
+.check-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.check-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.check-table td:first-child {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.check-table td:last-child {
+  overflow-wrap: anywhere;
+}
+
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--line);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  margin-left: 8px;
+}
+
+.colophon {
+  border-top: 1px solid var(--rule);
+  padding: 14px 20px 26px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.colophon p {
+  max-width: 88ch;
+  margin: 0 0 4px;
+}
+
+/* --- narrow screens: one column, the border becomes a rule on each crossing ------------- */
+
+@media (max-width: 860px) {
+  .turns-view {
+    grid-template-columns: 1fr;
+  }
+
+  .turn-list {
+    position: static;
+    max-height: 38vh;
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .turn {
+    padding: 14px 14px 40px;
+  }
+
+  .ledger {
+    background: none;
+  }
+
+  .ledger-head {
+    display: none;
+  }
+
+  .step {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .entry.remote,
+  .entry.local {
+    grid-column: 1;
+  }
+
+  .entry.remote {
+    background: var(--remote);
+    border-left: 6px double var(--line);
+    margin: 6px 0;
+  }
+
+  .entry.remote h3::after {
+    content: " (Microsoft 365)";
+    font-weight: 400;
+    color: var(--muted);
+  }
+
+  .cross {
+    display: none;
+  }
+
+  .masthead,
+  .views,
+  .checks-view,
+  .colophon {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-row.arrived {
+    animation: none;
+  }
+}

@@ -9,6 +9,7 @@
 import { isLoopbackHostname } from "./egress.js";
 import { MODELS, isLocalModel } from "./models.js";
 import { findShellTool, type ToolDef } from "./fenced.js";
+import { WORK_IQ_POLICIES, type WorkIqPolicy } from "./workiq.js";
 
 /** The provider id opencode addresses models by: `m365/<model>`. */
 export const PROVIDER_ID = "m365";
@@ -152,6 +153,20 @@ export interface PluginOptions {
    * plugin alike.
    */
   webSearch: boolean;
+  /**
+   * Run the gateway monitor: a page on this machine showing what each turn sent to
+   * Copilot, what came back, and what the gateway checked. OFF by default. Kept in
+   * memory only; `opencode-m365 monitor` prints its link. `M365_MONITOR=1` turns it on
+   * for the CLI and the plugin alike.
+   */
+  monitor: boolean;
+  /**
+   * What to do with a reply Copilot drew from your work data (Work IQ: email, files,
+   * chats, meetings): "hold" it (the default — opencode gets an error, not the reply),
+   * "flag" it in the monitor, or "allow" it. `M365_WORK_IQ` sets it for the CLI too.
+   * Unset here means the environment, then "hold".
+   */
+  workIq?: WorkIqPolicy;
   /** Use an already-running proxy instead of starting one in-process. */
   baseUrl?: string;
   /**
@@ -189,6 +204,11 @@ export function webSearchEnabled(options?: Pick<PluginOptions, "webSearch">): bo
   return options?.webSearch === true || process.env.M365_WEB_SEARCH === "1";
 }
 
+/** Is the gateway monitor on? The plugin option, or `M365_MONITOR=1`. */
+export function monitorEnabled(options?: Pick<PluginOptions, "monitor">): boolean {
+  return options?.monitor === true || process.env.M365_MONITOR === "1";
+}
+
 /** Where the proxy is, and the bearer secret it requires. */
 export interface ProxyEndpoint {
   baseUrl: string;
@@ -212,6 +232,10 @@ export function resolveOptions(raw: Partial<PluginOptions> | undefined): PluginO
     leanSystemPrompt: bool(options.leanSystemPrompt, false),
     studioAgent: bool(options.studioAgent, false),
     webSearch: bool(options.webSearch, false),
+    monitor: bool(options.monitor, false),
+    ...(typeof options.workIq === "string" && (WORK_IQ_POLICIES as readonly string[]).includes(options.workIq)
+      ? { workIq: options.workIq }
+      : {}),
     // opencode sends every prompt and the proxy key to `baseUrl`, so only a proxy on
     // this machine is accepted; anything else falls back to the in-process proxy.
     baseUrl: loopbackBaseUrl(options.baseUrl),

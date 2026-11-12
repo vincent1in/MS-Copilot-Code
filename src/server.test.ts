@@ -645,13 +645,24 @@ describe("the local titler", () => {
 });
 
 describe("streaming", () => {
-  it("streams a tool-less answer as it arrives", async () => {
+  it("streams a tool-less answer as it arrives when work-data replies are not held", async () => {
+    stub = await startStubCopilot({
+      respond: () => [delta("Hel"), delta("lo"), streamItem("Hello"), completion()],
+    });
+    const { url } = await start({ workIq: "flag" });
+    const text = await (await post(url, { stream: true, messages: [{ role: "user", content: "hi" }] })).text();
+    expect(text).toContain('"content":"Hel"');
+    expect(text).toContain("[DONE]");
+  });
+
+  it("buffers a tool-less answer under the default hold policy, since grounding evidence can arrive last", async () => {
     stub = await startStubCopilot({
       respond: () => [delta("Hel"), delta("lo"), streamItem("Hello"), completion()],
     });
     const { url } = await start();
     const text = await (await post(url, { stream: true, messages: [{ role: "user", content: "hi" }] })).text();
-    expect(text).toContain('"content":"Hel"');
+    expect(text).not.toContain('"content":"Hel"');
+    expect(text).toContain('"content":"Hello"');
     expect(text).toContain("[DONE]");
   });
 

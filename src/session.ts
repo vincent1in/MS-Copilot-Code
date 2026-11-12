@@ -170,6 +170,31 @@ export interface TurnOptions {
    * conversation before the turn and referenced from the chat message.
    */
   images?: readonly string[];
+  /** Sees the turn as it happens. The gateway monitor and the Work IQ check use it. */
+  observer?: TurnObserver;
+}
+
+/** Where a turn went and what it carried, for the monitor. Holds no credential. */
+export interface SentFrame {
+  host: string;
+  path: string;
+  /** The connection's query parameters, minus the access token. */
+  params: Record<string, string>;
+  /** The chat invocation's argument exactly as sent; the token rides in the URL, not here. */
+  argument: Record<string, unknown>;
+}
+
+/**
+ * Callbacks into a running turn. Each is optional, called synchronously, and isolated:
+ * an observer that throws cannot break the turn.
+ */
+export interface TurnObserver {
+  /** The chat request, as it is sent. */
+  sent?(frame: SentFrame): void;
+  /** A bot message with a `messageType` — control traffic, never the answer. Each distinct one once. */
+  control?(message: Record<string, unknown>): void;
+  /** New source attributions on the answer, when it has any. */
+  sources?(attributions: unknown[]): void;
 }
 
 /**
@@ -216,7 +241,7 @@ export class CopilotSession {
       headers: { ...BROWSER_HEADERS, "X-RoutingParameter-SessionKey": this.conversationId },
     });
     try {
-      const result = await this.pump(socket, message, turn);
+      const result = await this.pump(socket, message, turn, createTap(turn.observer, url));
       this.turnIndex += 1;
       return result;
     } finally {
@@ -285,7 +310,7 @@ export class CopilotSession {
   }
 
   /** Drive one turn to completion. */
-  private pump(socket: WebSocket, outgoing: OutgoingMessage, turn: TurnOptions): Promise<TurnResult> {
+  private pump(socket: WebSocket, outgoing: OutgoingMessage, turn: TurnOptions, tap: Tap): Promise<TurnResult> {
     return new Promise<TurnResult>((resolve, reject) => {
       let deltaText = "";
       let snapshotText = "";
@@ -344,7 +369,7 @@ export class CopilotSession {
           // The handshake ack is `{}`; the chat frame goes out immediately after.
           if (!handshakeDone) {
             handshakeDone = true;
-            this.sendChat(socket, outgoing, turn);
+            this.sendChat(socket, outgoing, turn, tap);
             // An ack carries nothing else, but a server that batches may.
             if (Object.keys(frame).length === 0) continue;
           }
@@ -353,7 +378,7 @@ export class CopilotSession {
             case 1:
               if (frame.target === "update") {
                 for (const argument of frame.arguments ?? []) {
-                  const applied = this.applyUpdate(argument, result, turn);
+                  const applied = this.applyUpdate(argument, result, turn, tap);
                   if (applied.disengaged) {
                     finish(new DisengagedError());
                     return;
@@ -365,7 +390,7 @@ export class CopilotSession {
               break;
 
             case 2:
-              this.applyStreamItem(frame.item, result);
+              this.applyStreamItem(frame.item, result, tap);
               if (frame.item?.result?.message && frame.item.result.message.length > snapshotText.length) {
                 snapshotText = frame.item.result.message;
               }
@@ -401,7 +426,7 @@ export class CopilotSession {
   }
 
   /** The chat invocation and its mandatory Metrics companion, in one send. */
-  private sendChat(socket: WebSocket, outgoing: OutgoingMessage, turn: TurnOptions): void {
+  private sendChat(socket: WebSocket, outgoing: OutgoingMessage, turn: TurnOptions, tap: Tap): void {
     const now = new Date().toISOString();
     const { text } = outgoing;
 
@@ -473,6 +498,7 @@ export class CopilotSession {
     );
     // Both frames, one send. This is the part that silently breaks everything.
     socket.send(`${JSON.stringify(chat)}${RS}${JSON.stringify(metrics)}${RS}`);
+    tap.sent(argument);
   }
 
   /** Fold one `update` argument into the accumulating result. */
@@ -480,6 +506,7 @@ export class CopilotSession {
     argument: any,
     result: TurnResult,
     turn: TurnOptions,
+    tap: Tap,
   ): { delta: string; snapshot: string; disengaged: boolean } {
     let deltaChunk = "";
     let snapshot = "";
@@ -500,15 +527,19 @@ export class CopilotSession {
       if (message?.author !== "bot") continue;
       if (message.messageType === "Disengaged") return { delta: deltaChunk, snapshot, disengaged: true };
       // A messageType means control traffic, never the answer.
-      if (message.messageType) continue;
+      if (message.messageType) {
+        tap.control(message);
+        continue;
+      }
       if (typeof message.text === "string" && message.text.length > snapshot.length) snapshot = message.text;
       absorbMetadata(message, result);
+      tap.sources(message.sourceAttributions);
     }
 
     return { delta: deltaChunk, snapshot, disengaged: false };
   }
 
-  private applyStreamItem(item: any, result: TurnResult): void {
+  private applyStreamItem(item: any, result: TurnResult, tap: Tap): void {
     if (!item) return;
     if (typeof item.result?.value === "string") result.resultValue = item.result.value;
     if (typeof item.result?.errorCode === "string") result.errorCode = item.result.errorCode;
@@ -519,9 +550,70 @@ export class CopilotSession {
       };
     }
     for (const message of item.messages ?? []) {
-      if (message?.author === "bot" && !message.messageType) absorbMetadata(message, result);
+      if (message?.author !== "bot") continue;
+      if (message.messageType) {
+        // The final item repeats the turn's control messages; the tap reports each once.
+        if (message.messageType !== "Disengaged") tap.control(message);
+        continue;
+      }
+      absorbMetadata(message, result);
+      tap.sources(message.sourceAttributions);
     }
   }
+}
+
+/** One turn's view of its observer: deduplicated, isolated, and free of credentials. */
+interface Tap {
+  sent(argument: Record<string, unknown>): void;
+  control(message: Record<string, unknown>): void;
+  sources(attributions: unknown): void;
+}
+
+function createTap(observer: TurnObserver | undefined, url: string): Tap {
+  if (!observer) return { sent: () => {}, control: () => {}, sources: () => {} };
+  const seenControl = new Set<string>();
+  const seenSources = new Set<string>();
+  const safely = (call: () => void) => {
+    try {
+      call();
+    } catch (error) {
+      log.warn("turn observer failed", String(error));
+    }
+  };
+  return {
+    sent(argument) {
+      if (!observer.sent) return;
+      safely(() => observer.sent!({ ...describeConnection(url), argument }));
+    },
+    control(message) {
+      if (!observer.control) return;
+      const key = [message.messageType, message.messageId, message.text, message.hiddenText].map((part) => String(part ?? "")).join("\u0000");
+      if (seenControl.has(key)) return;
+      seenControl.add(key);
+      safely(() => observer.control!(message));
+    },
+    sources(attributions) {
+      if (!observer.sources || !Array.isArray(attributions) || attributions.length === 0) return;
+      const fresh = attributions.filter((attribution) => {
+        const key = JSON.stringify(attribution)?.slice(0, 2_000) ?? "";
+        if (seenSources.has(key)) return false;
+        seenSources.add(key);
+        return true;
+      });
+      if (fresh.length > 0) safely(() => observer.sources!(fresh));
+    },
+  };
+}
+
+/** The chat URL without its credential: host, path, and every other query parameter. */
+export function describeConnection(url: string): Omit<SentFrame, "argument"> {
+  const parsed = new URL(url);
+  const params: Record<string, string> = {};
+  for (const [key, value] of parsed.searchParams) {
+    if (key.toLowerCase() === "access_token") continue;
+    params[key] = value;
+  }
+  return { host: parsed.host, path: parsed.pathname, params };
 }
 
 /** What the chat frame carries from the caller: the prompt and its uploaded images. */

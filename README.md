@@ -234,6 +234,8 @@ That stub run says nothing about Microsoft's side; see [Development](#developmen
     "options": {
       "studioAgent": false,      // create a Copilot Studio bot in your tenant (default: false)
       "webSearch": false,        // let Copilot use Bing on coding turns (default: false)
+      "workIq": "hold",          // a reply drawn from your work data: "hold" | "flag" | "allow"
+      "monitor": false,          // run the gateway monitor page (default: false)
       "lean": true,              // trim the toolset (default: true)
       "leanSystemPrompt": false, // replace opencode's prose prompt (default: false)
       "setDefaultModel": true,   // set `model` if you have not (default: true)
@@ -267,6 +269,7 @@ licence refusal was retried ten times. The error `code` says which refusal it wa
 | `m365_not_served` | M365 answered with its own refusal: no credits, a model this licence does not cover, or a dead tone. Called `m365_unavailable` up to 2.2.0 |
 | `m365_turn_rejected` | The server refused the request outright, typically a retired tone |
 | `m365_disengaged` | M365's filter refused to engage with the prompt. A disengaged conversation stays that way, so the proxy drops it: the next request opens a fresh conversation and replays the whole history |
+| `m365_work_data_held` | Copilot drew on your work data (Work IQ) and the `workIq` policy is `hold`, so the reply was not passed on. The conversation is dropped as for `m365_disengaged`. See [Work IQ](#work-iq-your-work-data) |
 
 Set `M365_TURN_LOG=/path/to/turns.jsonl` before starting opencode to record one line
 per M365 turn: the raw reply, the tool calls parsed from it, and M365's diagnostics
@@ -285,6 +288,100 @@ proxy answers it locally, without opening a connection. Compaction and generatio
 on the real model — they are real work, and only titling opens the extra conversation.
 `setSmallModel` turns this off; the name dates from opencode 1, where it set
 `small_model`. Any OpenAI client can also select `m365/local-title` by id.
+
+## Gateway monitor
+
+A page on this machine that shows, turn by turn, what crossed between opencode, the
+gateway and Microsoft 365 Copilot. It is **off by default**: turn it on with
+`{ "monitor": true }` in the plugin options or `M365_MONITOR=1`, or run
+`opencode-m365 serve --monitor`. Then open the link `opencode-m365 monitor` prints
+(`serve --monitor` prints it directly).
+
+Each turn is laid out with this machine on the left and Microsoft 365 on the right, so
+anything on the right has left the machine:
+
+- **opencode sent**: the new messages (your prompt, tool output, the system prompt on the
+  first turn), and which tools were passed on or left out.
+- **Sent to Copilot**: the exact text Copilot received, the connection's host, path and
+  parameters (never the access token), and the rest of the request envelope.
+- **What Copilot did**: its searches, search results, progress notes and cards.
+- **Copilot replied**: the raw reply, how long it took, which backend answered, the
+  conversation's message budget, classifier scores and any sources it cited.
+- **Handed to opencode**: the tool call or text opencode got, or why it got nothing.
+- **Checks**: every outbound connection and whether the egress allowlist let it through,
+  work data use, text that looks like a key or password in what was sent, the tool trim,
+  give-up retries, refusals and dropped conversations. The Checks tab lists them all.
+
+It is temporary. Records live in the gateway's memory, capped at 5,000 events and about
+24 million characters, oldest out first. **Clear** wipes them, and so does stopping the
+gateway. Nothing is written to disk. The page keeps its key in that browser tab's session
+storage, so a reload works and closing the tab forgets it.
+
+Prompts, replies and tool output are shown exactly as they were: that is the point. Key-like
+text is marked, not altered, because it was sent as is. The gateway's own credentials are
+never recorded.
+
+The page is served by a second loopback listener, separate from the proxy, so the proxy's
+"no browsers" rule is unchanged:
+
+- It binds 127.0.0.1 only, and refuses any `Host` that is not a loopback name on its own
+  port.
+- The page is static and holds no data. The log needs a per-launch key, sent in an
+  `Authorization` header. The key travels in the link's `#fragment`, which browsers
+  never send to a server, and the page removes it from the address bar.
+- Requests from other origins and sites are refused, preflights are never granted, and
+  no CORS headers are sent.
+- The content security policy allows only the page's own script and style. Responses
+  forbid framing, sniffing, caching and referrers.
+- Everything from opencode or Copilot is rendered as text, never as HTML.
+
+`opencode-m365 monitor` finds the link in an owner-only file under
+`~/.config/opencode-copilot/monitor/`. The file holds the link, not anything the page
+shows, and is deleted when the gateway stops.
+
+## Work IQ (your work data)
+
+Work IQ is Microsoft's name for Copilot drawing on your Microsoft 365 work data:
+email, files, chats, meetings and people. In Copilot Chat it is a single on/off button
+that replaced the separate Work and Web tabs. It comes only with the Microsoft 365
+Copilot add-on licence, and is on by default for those users.
+
+This gateway never asks for it. It uses the full-screen Copilot Chat scenario with no
+plugins, and the mailbox-grounded scenario is removed. Whether Microsoft applies Work IQ
+to such a turn anyway has not been verified against a live tenant. So every turn is
+checked for evidence instead:
+
+- **What counts as evidence:** Copilot's structured traffic only. That means its search
+  messages (`InternalSearchQuery`, `InternalSearchResult`, reference cards) and the
+  answer's source attributions, placed by the name of the search call and by the host of
+  each source.
+- **What doesn't:** the reply's own text. A SharePoint URL that is in your code is not
+  grounding.
+
+What happens next is the `workIq` option (or `M365_WORK_IQ`):
+
+| Policy | A reply drawn from work data | A search the gateway can't place | Web sources while Bing is off |
+|---|---|---|---|
+| `hold` (default) | **Held**: opencode gets `m365_work_data_held` instead of the reply, and the conversation is dropped | Flagged | Flagged |
+| `flag` | Passed on, flagged in the monitor | Flagged | Flagged |
+| `allow` | Passed on, noted | Noted | Noted |
+
+Under `hold`, tool-less replies are buffered rather than streamed, because the evidence
+can arrive with the last frame. Every turn is checked whether or not the monitor is on.
+With the monitor on, each turn shows what Copilot searched and cited. If you turned on
+`M365_TURN_LOG`, that debug file still records the raw reply of a held turn, as it
+records every reply.
+
+**What your organisation can see.** Microsoft's audit log for Copilot records each
+interaction:
+
+- its message IDs;
+- the files Copilot accessed, with their sensitivity labels;
+- the plugins it used (for example `BingWebSearch`);
+- whether a jailbreak or cross-prompt injection was detected.
+
+The text itself can be kept under your organisation's retention policies. Everything on
+the monitor's Microsoft 365 side is what reaches that record.
 
 ## Models
 
@@ -372,6 +469,8 @@ opencode-m365 login                   # sign in (browser window, SSO/MFA by hand
 opencode-m365 setup                   # point opencode at this checkout's build
 opencode-m365 serve [--port 4141]     # run the proxy standalone, for any OpenAI client
                                       # (send its key as `Authorization: Bearer`)
+            [--monitor]               # ...and the gateway monitor; prints its link
+opencode-m365 monitor                 # print the monitor link of each running gateway
 opencode-m365 doctor [--live]         # check auth, proxy and opencode wiring (read-only;
                                       # never provisions the Studio agent)
                                       # (--live sends one short message per model tone)
@@ -402,8 +501,9 @@ annotation. Only images new to a turn are uploaded: M365 already holds the earli
   one at a time.
 - **Account-level throttling** exists and is keyed to your identity, so re-authenticating
   does not clear it. It self-heals after a lull.
-- **Streaming** works for tool-less turns. A tool turn is buffered, because a fenced call
-  cannot be parsed until the fence closes.
+- **Streaming** works for tool-less turns when `workIq` is `flag` or `allow`. A tool turn
+  is buffered, because a fenced call cannot be parsed until the fence closes; under the
+  default `hold`, tool-less turns are buffered too (see [Work IQ](#work-iq-your-work-data)).
 - **Tool calling is emulated**, not native, and one call per turn is kept by default —
   M365 batches its whole plan into one response, and later steps run on guessed state.
 - `usage` reports zero tokens. M365 never exposes token counts; the `x_m365_*` extension

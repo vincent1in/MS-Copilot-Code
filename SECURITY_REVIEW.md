@@ -151,6 +151,29 @@ These cannot be fixed in code. Decide on them deliberately.
 6. **User-set paths.** The `M365_*` path variables (F18) decide where tokens, logs and the browser profile are written. Leave them unset, or point them at private directories.
 7. **MSAL network client.** `createGuardedNetworkClient` mirrors MSAL's fetch-based client, which msal-node does not export. A future msal-node could change that interface; the tests cover its shape. Errors come through as raw errors rather than MSAL's own types; for this app that is equivalent, since every failure means "sign in again". Egress denials are logged, because MSAL re-wraps them.
 
+## Addendum: gateway monitor and Work IQ (branch `gateway-monitor`)
+
+2026-11-12, by Claude, on top of `security-hardening`. This adds two things: a page that shows what each turn sends and receives, and a check on every turn for Copilot drawing on your work data. Both change what the code can do, so they are reviewed here on the same terms as the original findings.
+
+| # | Topic | Decision and why | Enforced by |
+|---|---|---|---|
+| M1 | **A new listener serving sensitive data.** The monitor shows every prompt, file the agent read and reply. | It is **off by default**. When on, it runs as its own loopback listener on its own port and origin, so the proxy's "refuse every browser" rule is untouched. Protections:<ul><li>a loopback-only bind and `Host` check (DNS rebinding);</li><li>a per-launch 32-byte key, required in an `Authorization` header and compared in constant time;</li><li>`Origin` must be its own, `Sec-Fetch-Site` must be same-origin, preflights are refused and no CORS headers are sent;</li><li>a CSP of `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'`, plus `nosniff`, `no-store` and `no-referrer`;</li><li>a static page with no data in it, rendered with `textContent` only;</li><li>at most 4 streams, and a slow reader is dropped past 64 MB of backlog.</li></ul> | `src/monitor/server.test.ts`, `src/monitor/built.test.ts` |
+| M2 | **How the key reaches the page.** | It travels in the link's `#fragment`, which browsers never send. The page moves it to that tab's session storage and removes it from the address bar. For the plugin, `opencode-m365 monitor` reads the link from an owner-only file (`0600` in a `0700` dir), which is deleted on exit; stale ones are swept. The link is never written to opencode's log. Any process running as you can read that file — the same boundary as the MSAL cache, which holds far more. | `src/monitor/links.test.ts` |
+| M3 | **What the monitor keeps.** | It is memory only: capped at 5,000 events and about 24M characters, cleared by Clear or when the gateway stops, and never written to disk. Conversation content is kept **verbatim**, on purpose, because the user asked to see exactly what was sent. The gateway's own credentials never enter it: the access token rides in the WebSocket URL, which is recorded as host, path and parameters minus `access_token`. Plumbing fields (summaries, details, parameters, the request envelope, error messages) also go through the log redactor. | `src/monitor/gateway.test.ts` ("never records the access token"), `src/monitor/monitor.test.ts` |
+| M4 | **Key-like text in prompts.** | Flagged, never altered. It was really sent, and the page must not understate that. The scanner is a linear-time heuristic with timing tests. It knows about ten shapes (PEM keys, JWTs, AWS, GitHub, Slack and Azure keys, bearer tokens, database URLs with passwords, `.env` secrets) and will miss others. | `src/monitor/secrets.test.ts` |
+| M5 | **Work IQ.** Copilot may draw on email, files, chats and meetings, and whether it does so for this gateway's requests is unverified. | Every turn is checked, with the monitor on or off. Evidence comes from structured protocol traffic only: search messages placed by the search call's name, and source attributions placed by host. Under the default `hold` policy:<ul><li>a reply drawn from work data never reaches opencode — it gets `m365_work_data_held`;</li><li>the conversation is dropped, so Copilot's work-grounded context goes with it;</li><li>tool-less replies are buffered rather than streamed, because the evidence can arrive last.</li></ul>A search the gateway cannot place is flagged, never held. `flag` and `allow` relax this. | `src/workiq.test.ts`, `src/monitor/gateway.test.ts` |
+| M6 | **Egress decisions are now announced.** | `onEgress` listeners hear host and purpose only, never the URL. A listener that throws is ignored, and listeners cannot change a decision. Each decision is tied to its turn through `AsyncLocalStorage`. The listener is removed when the server closes. | `src/egress.test.ts`, `src/monitor/gateway.test.ts` |
+
+**Not new:** the page's script and styles are plain files in this repo (`src/monitor/ui/`), served from `dist/ui/` and checked into review like any other source. No package, font, CDN or framework was added; `package.json` is unchanged.
+
+**Results.** 634 tests pass (up from 526). The CI path — typecheck, build and the whole suite inside a network namespace with the guard blocking — guarded 37 Node processes and recorded 0 non-loopback attempts, apart from the guard's own 5 self-test probes to `.invalid` hosts. The page was checked in headless Chrome against a scripted session: no console errors, the key removed from the address bar, reload working, and a tab without the key refused.
+
+**Residual:**
+
+1. Detection depends on undocumented message shapes. Grounding that leaves no structured trace cannot be seen.
+2. Whether the Work IQ button's off state can be requested explicitly is unknown. Capturing what the real Copilot web client sends with the button off, on a licensed account, would settle it.
+3. Neither feature has run against a live tenant yet.
+
 ## Re-verify it yourself
 
 ```sh

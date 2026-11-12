@@ -59,12 +59,79 @@ export function isPowerPlatformEnvironmentHost(host: string): boolean {
   return POWER_PLATFORM_ENVIRONMENT_HOST.test(host.toLowerCase());
 }
 
+/** One allowlist decision, as listeners see it. Names the host only, never the URL. */
+export interface EgressDecision {
+  purpose: EgressPurpose;
+  host: string;
+  allowed: boolean;
+  /** The target is this machine (the test stub); nothing leaves it. */
+  loopback: boolean;
+  /** Why it was refused, when it was. */
+  reason?: string;
+}
+
+const egressListeners = new Set<(decision: EgressDecision) => void>();
+
+/**
+ * Hear every allowlist decision from now on — the gateway monitor's checks trail.
+ * Returns the function that stops listening. A listener that throws is ignored: it
+ * can never turn a refusal into an allowance or the other way round.
+ */
+export function onEgress(listener: (decision: EgressDecision) => void): () => void {
+  egressListeners.add(listener);
+  return () => {
+    egressListeners.delete(listener);
+  };
+}
+
+function announce(decision: EgressDecision): void {
+  for (const listener of egressListeners) {
+    try {
+      listener(decision);
+    } catch {
+      /* a listener has no say in the decision */
+    }
+  }
+}
+
 /**
  * Check `target` against the allowlist for `purpose`. Returns the parsed URL, or
  * throws {@link EgressDeniedError}. The error names the host only, never the full
  * URL: the chat URL carries the access token in its query string.
  */
 export function assertEgress(purpose: EgressPurpose, target: string | URL): URL {
+  let url: URL;
+  try {
+    url = checkEgress(purpose, target);
+  } catch (error) {
+    if (egressListeners.size > 0) {
+      announce({
+        purpose,
+        host: hostOf(target),
+        allowed: false,
+        loopback: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
+  }
+  if (egressListeners.size > 0) {
+    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    announce({ purpose, host, allowed: true, loopback: isLoopbackHostname(host) });
+  }
+  return url;
+}
+
+/** The host of a target for a refusal notice, or a placeholder when it is not a URL. */
+function hostOf(target: string | URL): string {
+  try {
+    return new URL(target).hostname.replace(/^\[|\]$/g, "").toLowerCase() || "(no host)";
+  } catch {
+    return "(not a valid URL)";
+  }
+}
+
+function checkEgress(purpose: EgressPurpose, target: string | URL): URL {
   let url: URL;
   try {
     url = new URL(target);
