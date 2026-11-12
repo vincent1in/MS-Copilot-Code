@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -116,6 +116,54 @@ describe("signing in", () => {
     const { app } = controller({ signIn: async () => Promise.reject(new Error("Could not open a browser")) });
     await app.signIn();
     await vi.waitFor(async () => expect((await app.state()).signIn).toMatchObject({ running: false, error: "Could not open a browser" }));
+  });
+});
+
+describe("connecting OpenCode", () => {
+  it("adds this folder to OpenCode's config, keeps everything else, and saves the old file first", async () => {
+    const { app, dir } = controller();
+    const config = join(dir, "opencode.json");
+    const before = `${JSON.stringify({ theme: "tokyonight", plugins: ["/elsewhere/other-plugin"] }, null, 2)}\n`;
+    writeFileSync(config, before);
+
+    const state = await app.connectOpenCode(true);
+
+    const after = JSON.parse(readFileSync(config, "utf8"));
+    expect(after.theme).toBe("tokyonight");
+    expect(after.plugins).toEqual(["/elsewhere/other-plugin", join(dir, "gateway")]);
+    expect(after).toMatchObject({ update: "disable", share: "disabled", websearch: false });
+    expect(readFileSync(`${config}.bak`, "utf8")).toBe(before);
+    expect(state.opencode).toMatchObject({ connected: true, canConnect: true, quiet: { update: true, share: true, websearch: true } });
+    expect(state.opencode.lastConnect).toMatchObject({ quiet: true, backupPath: `${config}.bak` });
+  });
+
+  it("leaves OpenCode's own traffic settings alone unless asked, and running it twice changes nothing more", async () => {
+    const { app, dir } = controller();
+    const config = join(dir, "opencode.json");
+    await app.connectOpenCode(false);
+    const once = readFileSync(config, "utf8");
+    expect(JSON.parse(once)).toEqual({ plugins: [join(dir, "gateway")] });
+    await app.connectOpenCode(false);
+    expect(readFileSync(config, "utf8")).toBe(once);
+  });
+
+  it("refuses a config it can't read, and never rewrites an opencode.jsonc", async () => {
+    const broken = controller();
+    writeFileSync(join(broken.dir, "opencode.json"), "{ not json");
+    await expect(broken.app.connectOpenCode(true)).rejects.toThrow(/not valid JSON, so it was left alone/);
+    expect(readFileSync(join(broken.dir, "opencode.json"), "utf8")).toBe("{ not json");
+
+    const commented = controller();
+    writeFileSync(join(commented.dir, "opencode.jsonc"), "{\n  // mine\n}\n");
+    expect((await commented.app.state()).opencode.jsoncPath).toBe(join(commented.dir, "opencode.jsonc"));
+    await expect(commented.app.connectOpenCode(true)).rejects.toThrow(/can hold comments/);
+    expect(existsSync(join(commented.dir, "opencode.json"))).toBe(false);
+  });
+
+  it("is only offered by the standalone app: inside OpenCode it is already connected", async () => {
+    const { app } = controller({ context: "opencode" });
+    expect((await app.state()).opencode.canConnect).toBe(false);
+    await expect(app.connectOpenCode(true)).rejects.toThrow(/already running this gateway/);
   });
 });
 

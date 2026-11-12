@@ -165,6 +165,9 @@ export async function startMonitorServer(options: MonitorServerOptions): Promise
         case "/api/test":
           if (typeof body.model !== "string") return json(response, 400, { error: "Send { model }." });
           return json(response, 200, await app.sendTest(body.model));
+        case "/api/connect-opencode":
+          if (typeof body.quiet !== "boolean") return json(response, 400, { error: "Send { quiet: true } or { quiet: false }." });
+          return json(response, 200, await app.connectOpenCode(body.quiet));
         default:
           return json(response, 404, { error: "Not found." });
       }

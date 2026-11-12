@@ -162,6 +162,7 @@ describe("the setup endpoints", () => {
       }),
       signIn: vi.fn(async () => ({ context: "app", signIn: { running: true } })),
       sendTest: vi.fn(async (model: string) => ({ ok: true, model, reply: "hi" })),
+      connectOpenCode: vi.fn(async (quiet: boolean) => ({ context: "app", opencode: { connected: true, lastConnect: { quiet } } })),
       onChange: (listener: () => void) => {
         listeners.add(listener);
         return () => listeners.delete(listener);
@@ -180,6 +181,24 @@ describe("the setup endpoints", () => {
   const auth = { Authorization: "Bearer test-token-0123456789" };
   const postJson = (url: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
     fetch(`${url}${path}`, { method: "POST", headers: { ...auth, "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+
+  it("connects OpenCode only when asked plainly, with the key, from the page itself", async () => {
+    const app = fakeApp();
+    const { url } = await startWith(app);
+    expect((await fetch(`${url}/api/connect-opencode`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{\"quiet\":true}" })).status).toBe(401);
+    expect((await postJson(url, "/api/connect-opencode", {})).status).toBe(400);
+    expect((await postJson(url, "/api/connect-opencode", { quiet: "yes" })).status).toBe(400);
+    expect((await postJson(url, "/api/connect-opencode", { quiet: true }, { Origin: "https://evil.example" })).status).toBe(403);
+    // A form or a text/plain post (what another site could send) is refused before anything runs.
+    const plain = await fetch(`${url}/api/connect-opencode`, { method: "POST", headers: { ...auth, "Content-Type": "text/plain" }, body: "{\"quiet\":true}" });
+    expect(plain.status).toBe(400);
+    expect(app.connectOpenCode).not.toHaveBeenCalled();
+
+    const done = await postJson(url, "/api/connect-opencode", { quiet: false });
+    expect(done.status).toBe(200);
+    expect(await done.json()).toMatchObject({ opencode: { connected: true, lastConnect: { quiet: false } } });
+    expect(app.connectOpenCode).toHaveBeenCalledWith(false);
+  });
 
   it("needs the key, like the log", async () => {
     const { url } = await startWith(fakeApp());
@@ -226,7 +245,7 @@ describe("the setup endpoints", () => {
     const { url } = await startWith(fakeApp());
     expect((await fetch(`${url}/api/sign-in`, { headers: auth })).status).toBe(405);
     expect((await postJson(url, "/api/state", {})).status).toBe(405);
-    expect((await postJson(url, "/api/connect-opencode", { quiet: true })).status).toBe(404);
+    expect((await postJson(url, "/api/run", { command: "ls" })).status).toBe(404);
     expect((await postJson(url, "/api/settings", { key: "workIq", value: "flag" }, { Origin: "https://evil.example" })).status).toBe(403);
   });
 

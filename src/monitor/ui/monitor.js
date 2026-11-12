@@ -428,6 +428,10 @@ function boot() {
   const view = {
     tab: "turns",
     landed: false,
+    // Connect OpenCode: whether to also switch off OpenCode's own outside traffic, and the last outcome.
+    connectQuiet: true,
+    connecting: false,
+    connectError: null,
     selected: null,
     follow: true,
     paused: false,
@@ -631,6 +635,21 @@ function boot() {
     } catch (error) {
       app.error = error.message;
     }
+    dirty.app = true;
+    schedule();
+  }
+
+  async function connectOpenCode(quiet) {
+    view.connecting = true;
+    view.connectError = null;
+    dirty.app = true;
+    schedule();
+    try {
+      app.state = await api("/api/connect-opencode", { quiet });
+    } catch (error) {
+      view.connectError = error.message;
+    }
+    view.connecting = false;
     dirty.app = true;
     schedule();
   }
@@ -889,23 +908,73 @@ function boot() {
   function connectStep(s, inside) {
     const oc = s.opencode;
     if (inside) return step(3, true, "Connect OpenCode", status(true, "Connected. This page is running inside OpenCode."));
+    const allQuiet = Object.values(oc.quiet).every(Boolean);
+    const overridden = oc.pluginOptions ? Object.keys(oc.pluginOptions).filter((key) => key !== "baseUrl" && key !== "apiKey") : [];
+    const canPress = oc.canConnect && !oc.problem && !oc.jsoncPath;
+    const body = [status(oc.connected, oc.connected ? "Connected. OpenCode loads the gateway from this folder." : "Not connected yet.")];
+    if (oc.problem) {
+      body.push(h("div", { class: "callout warn" }, h("strong", null, "OpenCode's config file can't be read."), `${oc.configPath} is ${oc.problem}. Fix it first; the gateway won't change it.`));
+    }
+    if (oc.jsoncPath) {
+      body.push(h("p", null, "Your OpenCode config is ", h("code", null, oc.jsoncPath), ". It can hold comments, which rewriting would lose, so add the gateway to it yourself:"));
+    }
+
+    if (oc.connected) {
+      if (oc.lastConnect?.backupPath) body.push(h("p", { class: "setting-note" }, "The file as it was is saved as ", h("code", null, oc.lastConnect.backupPath), "."));
+      if (!allQuiet && canPress) {
+        body.push(
+          h("p", null, "OpenCode's own update checks, session sharing and web search are still on."),
+          h("div", { class: "row" }, h("button", { type: "button", id: "connect-quiet-only", disabled: view.connecting, onclick: () => connectOpenCode(true) }, "Turn them off")),
+        );
+      }
+      body.push(startLine());
+    } else if (canPress) {
+      body.push(
+        h("p", null, "Uses the OpenCode you already have: this adds the gateway's folder to OpenCode's config file and changes nothing else in it."),
+        h(
+          "label",
+          { class: "check" },
+          h("input", { type: "checkbox", id: "connect-quiet", checked: view.connectQuiet, onchange: (event) => (view.connectQuiet = event.currentTarget.checked) }),
+          " Also turn off OpenCode's own update checks, session sharing and web search",
+        ),
+        h(
+          "div",
+          { class: "row" },
+          h("button", { type: "button", class: "primary", id: "connect-opencode", disabled: view.connecting, onclick: () => connectOpenCode(view.connectQuiet) }, view.connecting ? "Connecting…" : "Connect OpenCode"),
+        ),
+        h("p", { class: "setting-note" }, "Changes ", h("code", null, oc.configPath), oc.readable ? `, saving it first as ${oc.configPath.split(/[\\/]/).pop()}.bak.` : " (a new file)."),
+      );
+    }
+    if (view.connectError) body.push(h("div", { class: "callout warn" }, h("strong", null, "OpenCode wasn't connected."), view.connectError));
+
+    if (!oc.connected) {
+      const manual = manualConnect(s, oc, allQuiet);
+      body.push(canPress ? h("details", { class: "manual" }, h("summary", null, "Or add it yourself"), manual) : manual);
+    }
+    if (overridden.length) {
+      body.push(h("p", { class: "setting-note locked" }, `OpenCode's config also sets ${overridden.join(", ")} for the gateway. Inside OpenCode those win over this page's Settings.`));
+    }
+    return step(3, oc.connected, "Connect OpenCode", ...body);
+  }
+
+  function startLine() {
+    return h("p", null, "Start OpenCode in your project with ", h("code", null, "opencode"), ". Models starting with m365/ come from the gateway; m365/gpt-6.1-sol is used when you haven't picked one.");
+  }
+
+  /** The same change by hand, or with the setup command. */
+  function manualConnect(s, oc, allQuiet) {
+    const configPath = oc.jsoncPath ?? oc.configPath;
     const pluginsJson = JSON.stringify({ plugins: [oc.pluginDir] }, null, 2);
     const quietJson = Object.entries(oc.quietSettings)
       .map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)
       .join(",\n");
-    const allQuiet = Object.values(oc.quiet).every(Boolean);
-    const overridden = oc.pluginOptions ? Object.keys(oc.pluginOptions).filter((key) => key !== "baseUrl" && key !== "apiKey") : [];
-    return step(
-      3,
-      oc.connected,
-      "Connect OpenCode",
-      status(oc.connected, oc.connected ? "Connected. OpenCode loads the gateway from this folder." : "Not connected yet."),
-      oc.problem ? h("div", { class: "callout warn" }, h("strong", null, "OpenCode's config file can't be read."), `${oc.configPath} is ${oc.problem}. Fix it first; the gateway won't change it.`) : null,
-      h("p", null, "Use the OpenCode you already have. Tell it about the gateway in its config file:"),
+    return h(
+      "div",
+      null,
       h(
         "ol",
         { class: "substeps" },
-        h("li", null, "Open OpenCode's config file. Create it if it isn't there.", snippet("opencode-config-path", oc.configPath)),
+        h("li", null, "Open OpenCode's config file. Create it if it isn't there.", snippet("opencode-config-path", configPath)),
         h(
           "li",
           null,
@@ -922,13 +991,10 @@ function boot() {
             : "Optional: to stop OpenCode's own outside traffic as well (update checks, session sharing and its web search), add these lines inside the same braces:",
           allQuiet ? null : snippet("opencode-quiet", quietJson),
         ),
-        h("li", null, "Start OpenCode in your project with ", h("code", null, "opencode"), ". Models starting with m365/ come from the gateway; m365/gpt-6.1-sol is used when you haven't picked one."),
+        h("li", null, startLine()),
       ),
-      overridden.length
-        ? h("p", { class: "setting-note locked" }, `OpenCode's config also sets ${overridden.join(", ")} for the gateway. Inside OpenCode those win over this page's Settings.`)
-        : null,
-      h("p", { class: "setting-note" }, "Rather run a command? This one makes the same change and saves a backup of your config. This page never edits it."),
-      snippet("setup-command", s.commands.setup),
+      oc.jsoncPath ? null : h("p", { class: "setting-note" }, "Or run this command, which makes the same change and saves a backup:"),
+      oc.jsoncPath ? null : snippet("setup-command", s.commands.setup),
     );
   }
 

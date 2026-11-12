@@ -34,6 +34,11 @@ export function thisCheckout(): { pluginDir: string; pluginRef: string } {
 
 export interface OpenCodeStatus {
   configPath: string;
+  /**
+   * An `opencode.jsonc` beside a missing `opencode.json`: OpenCode's config, in the
+   * form that allows comments. Nothing here edits it, since rewriting would drop them.
+   */
+  jsoncPath?: string;
   /** The config file exists and is valid JSON. */
   readable: boolean;
   /** Why it could not be read, when it exists but is not valid JSON. */
@@ -48,7 +53,10 @@ export interface OpenCodeStatus {
 
 export function openCodeStatus(pluginDir = thisCheckout().pluginDir, configPath = OPENCODE_CONFIG): OpenCodeStatus {
   const quietNone = { update: false, share: false, websearch: false };
-  if (!existsSync(configPath)) return { configPath, readable: false, connected: false, quiet: quietNone };
+  if (!existsSync(configPath)) {
+    const jsonc = jsoncBeside(configPath);
+    return { configPath, ...(jsonc ? { jsoncPath: jsonc } : {}), readable: false, connected: false, quiet: quietNone };
+  }
   let config: Record<string, any>;
   try {
     config = JSON.parse(readFileSync(configPath, "utf8"));
@@ -96,6 +104,10 @@ export function connectOpenCode(
 
   let existing: Record<string, any> = {};
   const hadConfig = existsSync(configPath);
+  const jsonc = hadConfig ? undefined : jsoncBeside(configPath);
+  if (jsonc) {
+    throw new Error(`Your OpenCode config is ${jsonc}, which can hold comments that rewriting would lose, so it was left alone. Add the gateway to it yourself.`);
+  }
   if (hadConfig) {
     try {
       existing = JSON.parse(readFileSync(configPath, "utf8"));
@@ -116,6 +128,13 @@ export function connectOpenCode(
     ...(hadConfig ? { backupPath } : {}),
     removedLegacyEntry: existing.plugin !== undefined && JSON.stringify(existing.plugin) !== JSON.stringify(merged.plugin),
   };
+}
+
+/** `opencode.jsonc` in the same folder as `opencode.json`, if there is one. */
+function jsoncBeside(configPath: string): string | undefined {
+  if (!configPath.endsWith(".json")) return undefined;
+  const jsonc = `${configPath}c`;
+  return existsSync(jsonc) ? jsonc : undefined;
 }
 
 /** Which package owns a local plugin path: its own dir or the one above (`dist/`). */

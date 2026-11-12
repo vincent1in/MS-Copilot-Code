@@ -1073,3 +1073,26 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+
+/* Connect OpenCode: the quiet-traffic choice, and the by-hand route folded away. */
+label.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 72ch;
+  margin: 10px 0 4px;
+}
+
+label.check input {
+  margin-top: 3px;
+}
+
+details.manual {
+  max-width: 72ch;
+  margin: 14px 0 0;
+}
+
+details.manual > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
