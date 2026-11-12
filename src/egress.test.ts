@@ -135,3 +135,50 @@ describe("redirects are never followed", () => {
     });
   });
 });
+
+describe("onEgress", () => {
+  it("hears every decision, by host only, and can stop listening", async () => {
+    const { onEgress } = await import("./egress.js");
+    const heard: unknown[] = [];
+    const stop = onEgress((decision) => heard.push(decision));
+    assertEgress("chat", "wss://substrate.office.com/m365Copilot/Chathub/o@t?access_token=SECRET");
+    expect(() => assertEgress("auth", "https://login.evil.example/token?refresh_token=SECRET")).toThrow(EgressDeniedError);
+    assertEgress("chat", "ws://127.0.0.1:9/x");
+    stop();
+    assertEgress("chat", "wss://substrate.office.com/x");
+    expect(heard).toEqual([
+      { purpose: "chat", host: "substrate.office.com", allowed: true, loopback: false },
+      {
+        purpose: "auth",
+        host: "login.evil.example",
+        allowed: false,
+        loopback: false,
+        reason: "refusing a auth request to login.evil.example: not on the egress allowlist",
+      },
+      { purpose: "chat", host: "127.0.0.1", allowed: true, loopback: true },
+    ]);
+    expect(JSON.stringify(heard)).not.toContain("SECRET");
+  });
+
+  it("cannot be swayed by a listener that throws", async () => {
+    const { onEgress } = await import("./egress.js");
+    const stop = onEgress(() => {
+      throw new Error("listener bug");
+    });
+    try {
+      expect(assertEgress("chat", "wss://substrate.office.com/x").hostname).toBe("substrate.office.com");
+      expect(() => assertEgress("chat", "wss://evil.example/x")).toThrow(EgressDeniedError);
+    } finally {
+      stop();
+    }
+  });
+
+  it("names a target that is not a URL without echoing it", async () => {
+    const { onEgress } = await import("./egress.js");
+    const heard: { host: string }[] = [];
+    const stop = onEgress((decision) => heard.push(decision));
+    expect(() => assertEgress("chat", "not a url access_token=SECRET")).toThrow(EgressDeniedError);
+    stop();
+    expect(heard[0]!.host).toBe("(not a valid URL)");
+  });
+});
