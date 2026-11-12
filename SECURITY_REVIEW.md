@@ -234,6 +234,41 @@ Each of the 306 installed packages was looked up on registry.npmjs.org. npm's do
 3. The sign-in page's own requests, to Microsoft and your sign-in provider, are by nature outside the gateway's allowlist.
 4. None of this has run against a live tenant. Sign-in, the test message and the page were exercised against the offline stub.
 
+## Addendum: Connect OpenCode, and local only, checked four ways (2.4.0)
+
+2026-11-12, by Claude, on `main` after 2.3.0. You asked for the Set up page to connect OpenCode for you (option 1: the gateway stays a plugin loaded from its folder), and to make sure the gateway is local only and that nothing goes out.
+
+| # | Topic | Decision and why | Enforced by |
+|---|---|---|---|
+| A9 | **The page edits OpenCode's config, when asked.** | `POST /api/connect-opencode` exists only on the page `start` serves (inside OpenCode, it is already connected). It has every protection of A3. It runs the same code as `setup`. That code adds this folder to `plugins`, plus the three quiet keys if the box is ticked, and keeps everything else. It saves the old file as `opencode.json.bak` first. It refuses a file that isn't valid JSON. It never creates `opencode.json` beside an `opencode.jsonc`, whose comments a rewrite would lose. In those last two cases the page shows the lines to add by hand. | `src/monitor/app.test.ts` ("connecting OpenCode"), `src/monitor/server.test.ts` (key, origin, `text/plain`, bad bodies) |
+| A10 | **Stopping always stops.** In the sealed-network run, `login` ignored a stop signal while its browser kept retrying a connection: Playwright's polite close waited forever. | The sign-in browser is launched with Playwright's SIGTERM/SIGHUP handling off. `login` exits on those signals itself, and Playwright's exit hook then kills the browser. `start` exits within 3 s of SIGINT, SIGTERM or SIGHUP even if a close hangs. Ctrl+C was already fine. | `src/login.test.ts`; the sealed-network run's sign-in step now ends on time |
+
+### Local only and outbound, checked four ways
+
+`scripts/sealed-network/run.sh` runs the built gateway in its own Linux network namespace. Its only way out is a virtual cable to a "sink" namespace. The sink answers every DNS question with its own address, logs every lookup, connection and TLS server name, and tcpdump records every packet. Nothing reaches the internet.
+
+The same run records every Node connection attempt (`net-guard`, log-only, so nothing is hidden) and every network system call (strace on the whole process tree). From the sink, it also tries to connect to every port the gateway listens on.
+
+The signed-in steps use a real MSAL token cache that MSAL itself writes offline from fake tokens, one usable and one expired.
+
+| Step | Cable (sink log and tcpdump) | strace | Node recorder |
+|---|---|---|---|
+| A1: `help`, `doctor`, `setup --quiet` | nothing | nothing off the machine | nothing (4 processes) |
+| A2: `start`, the page's state, a setting saved twice, **Connect**, a test message while signed out | nothing; inbound probes refused | nothing off the machine | nothing |
+| B: the plugin as OpenCode loads it (25 models), with its page, plus a chat while signed out | nothing; inbound probes refused | nothing off the machine | nothing |
+| C: a test message, signed in, valid token | 1 DNS lookup and 1 TLS connection, both `substrate.office.com` | DNS and :443 only | `substrate.office.com` only |
+| D: a test message, signed in, expired token | 1 DNS lookup and 1 TLS connection, both `login.microsoftonline.com` (the token refresh) | DNS and :443 only | one POST to `login.microsoftonline.com/common/oauth2/v2.0/token` |
+| E: the sign-in window, Chrome 153, open 45 s | 2 DNS lookups and 26 TLS connections, all `login.microsoftonline.com` | not traced (Chrome and strace both need ptrace) | nothing |
+
+The verdict over the whole run:
+
+- **Names looked up or connected to:** only `login.microsoftonline.com` and `substrate.office.com`.
+- **Listeners:** every one bound to `127.0.0.1`, as `ss` shows.
+- **Inbound:** every probe from outside the machine was refused.
+- **Other packets:** none, apart from the kernel's own ARP between the two namespace ends.
+
+This is the fourth line of defence. It sits beneath the code's two-host allowlist and listener checks, the Node recorder and the system-call trace.
+
 ## Re-verify it yourself
 
 ```sh
@@ -258,12 +293,16 @@ grep -rnE "fetch\(|new WebSocket|child_process|eval\(|new Function|import\(" src
 # What the sign-in browser contacts by itself (a minute on an empty page, all of it refused):
 node dist/cli.mjs doctor --browser
 
+# The four-way outbound and inbound check, on Linux (needs root, tcpdump, strace; xvfb-run
+# and Chrome for the sign-in window step):
+sudo sh scripts/sealed-network/run.sh
+
 # A release zip: check it against its .sha256, then every file against SHA256SUMS.
-shasum -a 256 -c opencode-m365-copilot-2.3.0.zip.sha256
-unzip -q opencode-m365-copilot-2.3.0.zip && cd opencode-m365-copilot-2.3.0 && shasum -a 256 -c SHA256SUMS
+shasum -a 256 -c opencode-m365-copilot-2.4.0.zip.sha256
+unzip -q opencode-m365-copilot-2.4.0.zip && cd opencode-m365-copilot-2.4.0 && shasum -a 256 -c SHA256SUMS
 # Rebuild dist/ from the zip's own source and lockfile, in a copy, and compare:
 cp -R . ../rebuild && cd ../rebuild && npm ci --ignore-scripts && npm run build \
-  && diff -r dist ../opencode-m365-copilot-2.3.0/dist && echo "dist/ is identical"
+  && diff -r dist ../opencode-m365-copilot-2.4.0/dist && echo "dist/ is identical"
 ```
 
 ## Taking upstream changes later
