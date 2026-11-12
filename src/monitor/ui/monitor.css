@@ -1,8 +1,9 @@
 /*
- * Gateway monitor. One idea carries the page: the border. Each turn is laid out as a
- * ledger split by a double rule — this machine on the left, Microsoft 365 on the
- * right — so anything shown on the right is something that has left the machine.
- * Everything else stays quiet; colour is spent only on what needs attention.
+ * Microsoft Copilot gateway. One idea carries the page: the border. Each turn is laid
+ * out as a ledger split by a double rule — this machine on the left, Microsoft 365 on
+ * the right — so anything shown on the right has left the machine. The Set up steps
+ * hang off the same rule. Everything else stays quiet; colour is spent only on what
+ * needs attention.
  */
 
 :root {
@@ -145,8 +146,17 @@ h1 {
   background: var(--stop);
 }
 
+.who {
+  margin: 0 0 0 auto;
+  color: var(--muted);
+}
+
+.who strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .controls {
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -158,27 +168,6 @@ h1 {
   gap: 6px;
   color: var(--muted);
   margin-right: 6px;
-}
-
-.facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 22px;
-  margin: 10px 0 0;
-}
-
-.facts div {
-  display: flex;
-  gap: 6px;
-}
-
-.facts dt {
-  color: var(--muted);
-}
-
-.facts dd {
-  margin: 0;
-  font-weight: 600;
 }
 
 /* --- views ------------------------------------------------------------------------ */
@@ -208,7 +197,26 @@ h1 {
 
 /* --- turns: list and detail ---------------------------------------------------------- */
 
-.turns-view {
+.traffic-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+.traffic-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+.traffic-bar .controls {
+  margin-left: auto;
+}
+
+.turns-split {
   display: grid;
   grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
   align-items: start;
@@ -348,7 +356,7 @@ h1 {
   padding-bottom: 6px;
 }
 
-.step,
+.step-row,
 .ledger-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--gutter) minmax(0, 1fr);
@@ -668,6 +676,13 @@ summary {
   color: var(--muted);
 }
 
+@media (min-width: 861px) {
+  .check-table td:nth-child(2),
+  .check-table td:nth-child(3) {
+    white-space: nowrap;
+  }
+}
+
 .check-table td:last-child {
   overflow-wrap: anywhere;
 }
@@ -697,7 +712,7 @@ summary {
 /* --- narrow screens: one column, the border becomes a rule on each crossing ------------- */
 
 @media (max-width: 860px) {
-  .turns-view {
+  .turns-split {
     grid-template-columns: 1fr;
   }
 
@@ -721,7 +736,7 @@ summary {
     display: none;
   }
 
-  .step {
+  .step-row {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -748,15 +763,308 @@ summary {
 
   .masthead,
   .views,
+  .traffic-bar,
   .checks-view,
+  .page,
   .colophon {
     padding-left: 14px;
     padding-right: 14px;
+  }
+
+  .who {
+    margin-left: 0;
+    flex-basis: 100%;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .turn-row.arrived {
     animation: none;
+  }
+}
+
+/* --- Set up and Settings ------------------------------------------------------------- */
+
+.page {
+  max-width: 820px;
+  padding: 22px 24px 40px;
+}
+
+.page h2 {
+  font-size: 19px;
+  margin-bottom: 6px;
+}
+
+.lede {
+  margin: 0 0 18px;
+  max-width: 72ch;
+}
+
+.lede code,
+.step code,
+.setting code {
+  font-family: var(--font-code);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* The steps hang off the same double rule as the ledger. */
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+
+.steps::before {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 6px;
+  bottom: 6px;
+  width: 6px;
+  border-left: 2px solid var(--line);
+  border-right: 2px solid var(--line);
+  opacity: 0.35;
+}
+
+.step {
+  position: relative;
+  padding: 0 0 26px 48px;
+}
+
+.step-mark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-head);
+  font-weight: 600;
+  background: var(--surface);
+  color: var(--line);
+  border: 2px solid var(--line);
+}
+
+.step.done .step-mark {
+  background: var(--line);
+  color: var(--on-line);
+}
+
+.step h3 {
+  font-size: 16px;
+  line-height: 32px;
+  margin: 0;
+}
+
+.step-status {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+.step-status.done {
+  color: var(--ok);
+}
+
+.step-status.todo {
+  color: var(--muted);
+}
+
+.step p {
+  max-width: 72ch;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 10px 0;
+}
+
+.row label {
+  color: var(--muted);
+}
+
+select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+button.primary {
+  background: var(--line);
+  border-color: var(--line);
+  color: var(--on-line);
+  font-weight: 600;
+  padding: 6px 14px;
+}
+
+button.primary:disabled,
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.quote {
+  border-left: 3px solid var(--rule);
+  padding: 2px 0 2px 10px;
+  margin: 6px 0;
+  color: var(--muted);
+  max-width: 72ch;
+}
+
+.answer {
+  background: var(--remote);
+  border-left: 6px double var(--line);
+  padding: 8px 12px;
+  margin: 10px 0 0;
+  max-width: 72ch;
+}
+
+.answer p {
+  margin: 0 0 4px;
+}
+
+.snippet {
+  position: relative;
+  margin: 8px 0 12px;
+}
+
+.snippet pre {
+  font: 12.5px/1.5 var(--font-code);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 10px 76px 10px 12px;
+  margin: 0;
+  /* Code keeps its lines; a long one scrolls rather than breaking mid-word. */
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.snippet button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 12px;
+  padding: 1px 8px;
+}
+
+.substeps {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.substeps > li {
+  margin-bottom: 10px;
+  max-width: 72ch;
+}
+
+.hosts {
+  margin: 0 0 22px;
+  padding: 10px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  max-width: 72ch;
+}
+
+.hosts p {
+  margin: 0;
+}
+
+.hosts ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+/* Settings: one row per setting, explanation on the left, the control on the right. */
+.settings-group {
+  margin: 0 0 26px;
+}
+
+.settings-group h3 {
+  font-size: 15px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 6px 22px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.setting-name {
+  font-weight: 600;
+  margin: 0 0 3px;
+}
+
+.setting-name .tag {
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 6px;
+}
+
+.setting-help {
+  margin: 0;
+  color: var(--muted);
+  max-width: 64ch;
+}
+
+.setting-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.setting-note.locked {
+  color: var(--warn);
+}
+
+.choices {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.choices label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.choices input {
+  accent-color: var(--line);
+}
+
+.saved {
+  font-size: 12px;
+  color: var(--ok);
+  min-height: 1.4em;
+}
+
+.saved.failed {
+  color: var(--stop);
+}
+
+/* After the base rule above, so it wins on narrow screens. */
+@media (max-width: 640px) {
+  .setting {
+    grid-template-columns: 1fr;
   }
 }

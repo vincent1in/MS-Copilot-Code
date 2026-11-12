@@ -156,7 +156,7 @@ export function summarizeGrounding(signals: readonly GroundingSignal[]): Groundi
 export class WorkDataHeldError extends Error {
   constructor(summary: string) {
     super(
-      `${summary} The gateway held this reply, so none of it reached opencode, and the next request starts a fresh Copilot conversation. To let such replies through, set the plugin's workIq option (or M365_WORK_IQ) to "flag".`,
+      `${summary} The gateway held this reply, so none of it reached OpenCode, and the next request starts a fresh Copilot conversation. To let such replies through, open the gateway's page (opencode-m365 start) and change "When Copilot uses your work data" under Settings.`,
     );
     this.name = "WorkDataHeldError";
   }

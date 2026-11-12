@@ -13,20 +13,23 @@
  * holding both factors lets anyone who can read it pass MFA as you. A `secrets.json`
  * left over from upstream is never read (`opencode-m365 doctor` warns if it exists).
  *
- * Browser: by default Playwright's bundled Chromium, which must already be installed
- * (`npx playwright install chromium` downloads it — an explicit, separate step; nothing
- * here downloads anything). To use a browser you already have instead, set
- * `M365_BROWSER_CHANNEL=msedge` (or `chrome`), or `CHROMIUM_PATH` to its executable.
+ * Browser: one you already have. By default Microsoft Edge, then Google Chrome, then
+ * Playwright's own Chromium if someone installed it explicitly (nothing here downloads
+ * a browser). The app's Settings page can pin one; `M365_BROWSER_CHANNEL=msedge` (or
+ * `chrome`) or `CHROMIUM_PATH=/path/to/browser` override both.
  *
  * Either way it is a one-time cost — afterwards `auth.ts` refreshes silently.
  */
 
-import { realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AUTHORITY, CLIENT_ID, REDIRECT_URI, SYDNEY_SCOPES, authCodeFromUrl, createCachePlugin } from "./auth.js";
-import { createGuardedNetworkClient } from "./egress.js";
+import { createGuardedNetworkClient, withoutLibraryTelemetry } from "./egress.js";
 import { CONFIG_DIR } from "./paths.js";
 import { ensurePrivateDir } from "./private-fs.js";
 
@@ -34,6 +37,8 @@ export interface LoginOptions {
   cacheFile?: string;
   timeoutMs?: number;
   onStatus?: (message: string) => void;
+  /** Which installed browser to use: `auto` tries Edge, then Chrome. */
+  browser?: "auto" | "msedge" | "chrome";
 }
 
 /**
@@ -63,7 +68,9 @@ export async function login(options: LoginOptions = {}): Promise<string> {
   });
 
   status("Opening a browser window — complete sign-in there.");
-  const code = await captureAuthCode(authUrl, options);
+  // MSAL adds its own name, version, OS and CPU to the sign-in address. Microsoft's
+  // sign-in page does not need them, so they are taken off (see egress.ts).
+  const code = await captureAuthCode(withoutLibraryTelemetry(new URL(authUrl)).toString(), options);
 
   const result = await app.acquireTokenByCode({
     code,
@@ -87,14 +94,7 @@ async function captureAuthCode(authUrl: string, options: LoginOptions): Promise<
   // It holds Entra SSO cookies.
   ensurePrivateDir(profileDir);
 
-  const context = await playwright.chromium.launchPersistentContext(profileDir, {
-    headless: false,
-    ...(process.env.M365_BROWSER_CHANNEL ? { channel: process.env.M365_BROWSER_CHANNEL } : {}),
-    executablePath: process.env.CHROMIUM_PATH || undefined,
-    locale: process.env.M365_LOGIN_LOCALE || "en-GB",
-    timezoneId: process.env.M365_LOGIN_TIMEZONE || undefined,
-    ...(process.env.M365_LOGIN_UA ? { userAgent: process.env.M365_LOGIN_UA } : {}),
-  });
+  const { context } = await launchBrowser(playwright, profileDir, options.browser ?? "auto");
 
   try {
     const page = context.pages()[0] ?? (await context.newPage());
@@ -125,6 +125,177 @@ async function captureAuthCode(authUrl: string, options: LoginOptions): Promise<
   } finally {
     await context.close().catch(() => {});
   }
+}
+
+/** The browsers to try, in order. The environment wins, for anyone who set it. */
+export function browserCandidates(choice: "auto" | "msedge" | "chrome"): { channel?: string; executablePath?: string; label: string }[] {
+  if (process.env.CHROMIUM_PATH) return [{ executablePath: process.env.CHROMIUM_PATH, label: process.env.CHROMIUM_PATH }];
+  if (process.env.M365_BROWSER_CHANNEL) return [{ channel: process.env.M365_BROWSER_CHANNEL, label: process.env.M365_BROWSER_CHANNEL }];
+  if (choice === "msedge") return [{ channel: "msedge", label: "Microsoft Edge" }];
+  if (choice === "chrome") return [{ channel: "chrome", label: "Google Chrome" }];
+  return [
+    { channel: "msedge", label: "Microsoft Edge" },
+    { channel: "chrome", label: "Google Chrome" },
+    // Only works if someone ran `npx playwright install chromium` on purpose.
+    { label: "Playwright's Chromium" },
+  ];
+}
+
+/**
+ * The browser's own background services, pointed at a closed port on this machine.
+ *
+ * Playwright already starts the browser with most background traffic switched off, but
+ * measured with Chrome 153, a sign-in window left open for 90 seconds still called
+ * accounts.google.com (`/ListAccounts`), android.clients.google.com (`/checkin`, for
+ * push messaging) and update.googleapis.com (component updates) on its own. These
+ * switches send those three to 127.0.0.1:9, which never leaves the machine (browsers
+ * skip any proxy for loopback); the same window then made no outside connection at all.
+ *
+ * Microsoft's sign-in page does not use any of them, so sign-in is unaffected. Edge
+ * shares these switches with Chrome, but its own Microsoft services are separate and
+ * follow your organization's Edge policies.
+ */
+export const QUIET_BROWSER_ARGS: readonly string[] = [
+  "--gaia-url=https://127.0.0.1:9/",
+  "--gcm-checkin-url=https://127.0.0.1:9/",
+  "--gcm-registration-url=https://127.0.0.1:9/",
+  "--gcm-mcs-endpoint=https://127.0.0.1:9/",
+  "--component-updater=url-source=https://127.0.0.1:9/",
+];
+
+/** How the sign-in window is opened with one candidate browser. */
+export function launchOptions(candidate: { channel?: string; executablePath?: string }, env: NodeJS.ProcessEnv = process.env) {
+  return {
+    headless: false,
+    ...(candidate.channel ? { channel: candidate.channel } : {}),
+    ...(candidate.executablePath ? { executablePath: candidate.executablePath } : {}),
+    locale: env.M365_LOGIN_LOCALE || "en-GB",
+    timezoneId: env.M365_LOGIN_TIMEZONE || undefined,
+    ...(env.M365_LOGIN_UA ? { userAgent: env.M365_LOGIN_UA } : {}),
+    args: [...QUIET_BROWSER_ARGS],
+  };
+}
+
+async function launchBrowser(
+  playwright: any,
+  profileDir: string,
+  choice: "auto" | "msedge" | "chrome",
+  extra: { proxy?: { server: string }; args?: string[] } = {},
+): Promise<{ context: any; label: string }> {
+  const tried: string[] = [];
+  for (const candidate of browserCandidates(choice)) {
+    try {
+      const options = launchOptions(candidate);
+      const context = await playwright.chromium.launchPersistentContext(profileDir, {
+        ...options,
+        ...(extra.proxy ? { proxy: extra.proxy } : {}),
+        args: [...options.args, ...(extra.args ?? [])],
+      });
+      return { context, label: candidate.label };
+    } catch (error) {
+      tried.push(`${candidate.label}: ${String((error as Error)?.message ?? error).split("\n")[0]}`);
+    }
+  }
+  throw new Error(`Could not open a browser to sign in with. Install Microsoft Edge or Google Chrome, or pick another browser. Tried — ${tried.join("; ")}`);
+}
+
+export interface BrowserTraffic {
+  /** The browser that was opened. */
+  browser: string;
+  /** Hosts the browser asked for on its own, and how many times. */
+  hosts: Map<string, number>;
+  /** Of those, the hosts that went around the refusing proxy (a policy can set the browser's proxy). */
+  direct: Set<string>;
+}
+
+/**
+ * What the sign-in browser contacts by itself, for `opencode-m365 doctor --browser`.
+ *
+ * Opens the browser exactly as sign-in does, but with a fresh throwaway profile, on an
+ * empty page, for `seconds`. Its traffic goes to a proxy on this machine that notes
+ * each host and refuses it, so nothing gets out that way. The browser's own network
+ * log is read as well, because an organization's policy can give the browser a proxy
+ * of its own, and then requests go around ours: those are reported as `direct`.
+ */
+export async function browserTraffic(options: { browser?: "auto" | "msedge" | "chrome"; seconds?: number } = {}): Promise<BrowserTraffic> {
+  const playwright = await importPlaywright();
+  const proxy = await startRefusingProxy();
+  const profileDir = mkdtempSync(join(tmpdir(), "m365-browser-check-"));
+  const netLog = join(profileDir, "net-log.json");
+  try {
+    const { context, label } = await launchBrowser(playwright, profileDir, options.browser ?? "auto", {
+      proxy: { server: proxy.url },
+      args: [`--log-net-log=${netLog}`, "--net-log-capture-mode=Default"],
+    });
+    try {
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto("about:blank");
+      await new Promise((done) => setTimeout(done, (options.seconds ?? 60) * 1000));
+    } finally {
+      await context.close().catch(() => {});
+    }
+    const hosts = new Map(proxy.hosts);
+    const direct = new Set<string>();
+    for (const host of hostsInNetLog(netLog)) {
+      if (!hosts.has(host)) {
+        direct.add(host);
+        hosts.set(host, 1);
+      }
+    }
+    return { browser: label, hosts, direct };
+  } finally {
+    await proxy.close();
+    rmSync(profileDir, { recursive: true, force: true });
+  }
+}
+
+/** Remote hosts of the URLs in a browser network log (loopback and local pages left out). */
+export function hostsInNetLog(path: string): Set<string> {
+  let text = "";
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return new Set();
+  }
+  const hosts = new Set<string>();
+  for (const match of text.matchAll(/"url":"(https?:\/\/[^"\\]+)/g)) {
+    try {
+      const { hostname } = new URL(match[1]!);
+      if (hostname && hostname !== "localhost" && !/^127\./.test(hostname) && hostname !== "[::1]") hosts.add(hostname);
+    } catch {
+      /* not a URL */
+    }
+  }
+  return hosts;
+}
+
+/** A proxy on 127.0.0.1 that records the host of every request and refuses all of them. */
+export async function startRefusingProxy(): Promise<{ url: string; hosts: Map<string, number>; close(): Promise<void> }> {
+  const hosts = new Map<string, number>();
+  const note = (host: string) => {
+    if (host) hosts.set(host, (hosts.get(host) ?? 0) + 1);
+  };
+  const server = createServer((request, response) => {
+    let host = "";
+    try {
+      host = new URL(request.url ?? "").hostname;
+    } catch {
+      host = String(request.headers.host ?? "").replace(/:\d+$/, "");
+    }
+    note(host);
+    response.writeHead(403).end();
+  });
+  server.on("connect", (request, socket) => {
+    note(String(request.url ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, ""));
+    socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+  });
+  await new Promise<void>((listening) => server.listen(0, "127.0.0.1", listening));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    hosts,
+    close: () => new Promise<void>((closed) => server.close(() => closed())),
+  };
 }
 
 /**

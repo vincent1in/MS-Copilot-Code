@@ -56,8 +56,8 @@ export const LOCAL_TITLE_MODEL = "local-title";
  * the 100% that project's README reports for it.
  */
 //
-// This fork defaults to `gpt-6.1-sol` instead. Here the Copilot Studio agent is
-// opt-in, so tool turns normally run agent-less, and for agent-less turns the
+// This fork defaults to `gpt-6.1-sol` instead. Upstream's Copilot Studio agent is
+// removed here, so every tool turn runs agent-less, and for agent-less turns the
 // evidence points elsewhere: the reference project (cramt/m365-copilot-proxy, README
 // and hypotheses §23/§27–29) measured GPT-6 Sol and GPT-6.1 Sol under the `relay`
 // framing at 60/60 and 39/40 on its bench and 30/30 driving a real agent, on accounts
@@ -70,7 +70,7 @@ export const DEFAULT_MODEL = "gpt-6.1-sol";
 export const MODELS: readonly ModelInfo[] = [
   // Work on every account (the included Copilot Chat scenario), and are the
   // best-measured choice agent-less — see DEFAULT_MODEL. Reasoning tones: 10-30s a turn.
-  m("gpt-6.1-sol", "GPT-6.1 Sol (recommended without Copilot Studio)", "Gpt_61_Sol_Reasoning", true),
+  m("gpt-6.1-sol", "GPT-6.1 Sol (recommended)", "Gpt_61_Sol_Reasoning", true),
   m("gpt-6-sol", "GPT-6 Sol", "Gpt_6_Sol_Reasoning", true),
   // Upstream's mailbox-grounded `work` / `work-think` models (Copilot searching your
   // mail, Teams and files server-side) are removed in this fork: not needed for
@@ -165,33 +165,28 @@ const SOL_SANDBOX_TOOLS = "bash_tool, create_file, str_replace, view, …";
 export interface ToolRoute {
   /** `relay`: the user asks to be guided through their own terminal, one command at a time. */
   framing: "default" | "relay";
-  /** Attach the declarative agent. */
-  agent: boolean;
   /** The model's own sandbox tools, named so the relay note can steer it away from them. */
   sandbox?: string;
 }
 
 /**
- * - Reasoning GPT tones keep the agent (agent-less GPT-5.x made no tool calls in the
- *   reference project, 0/4), but under the default framing they say they cannot reach
- *   the workspace, even after a command succeeded. The reference project's `relay`
- *   framing, where the user asks to be guided through their own terminal, took that to
- *   30/30. Ours said it on the first reply in 8 of 8 runs.
+ * Every turn is agent-less in this fork (upstream's Copilot Studio agent is removed).
+ *
+ * - Reasoning GPT tones under the default framing say they cannot reach the workspace,
+ *   even after a command succeeded. The reference project's `relay` framing, where the
+ *   user asks to be guided through their own terminal, took that to 30/30. Ours said
+ *   it on the first reply in 8 of 8 runs.
  * - Chat GPT tones work as they are.
- * - Claude stays as it was: with the agent, which M365 answers on GPT. The reference
- *   project ran Claude without the agent and with `relay` (193/200), but without the
- *   agent an account with no Claude licence refuses every tool turn
- *   (`ClaudeUnavailableForLicense`), where today it quietly gets GPT. Unmeasured on a
- *   licensed account, so not adopted.
+ * - Claude tones use the default framing. Agent-less, an account with no Claude
+ *   licence refuses their tool turns (`ClaudeUnavailableForLicense`); upstream hid that
+ *   by attaching the Studio agent, which M365 answers on GPT.
  */
 export function toolRouteFor(tone: string | null): ToolRoute {
   // GPT-6 Sol / 6.1 Sol: relay, naming the built-in sandbox tools exactly as the
-  // reference project's measured relay note does. Without the agent these tones have
-  // a remote sandbox of their own and will work there instead of in your workspace
-  // unless told it is the wrong machine.
-  if (tone && /^Gpt_\d+_Sol_Reasoning$/.test(tone)) {
-    return { framing: "relay", agent: true, sandbox: SOL_SANDBOX_TOOLS };
-  }
-  if (tone?.startsWith("Gpt_") && tone.endsWith("_Reasoning")) return { framing: "relay", agent: true };
-  return { framing: "default", agent: true };
+  // reference project's measured relay note does. These tones have a remote sandbox of
+  // their own and will work there instead of in your workspace unless told it is the
+  // wrong machine.
+  if (tone && /^Gpt_\d+_Sol_Reasoning$/.test(tone)) return { framing: "relay", sandbox: SOL_SANDBOX_TOOLS };
+  if (tone?.startsWith("Gpt_") && tone.endsWith("_Reasoning")) return { framing: "relay" };
+  return { framing: "default" };
 }

@@ -26,7 +26,6 @@ async function start(overrides: Record<string, any> = {}) {
   proxy = await startServer({
     getToken: async () => fakeToken(),
     endpoint: stub.origin,
-    resolveAgent: async () => "T_t.b.gpt.default",
     ...overrides,
   });
   return proxy;
@@ -296,14 +295,12 @@ describe("chat completions", () => {
   });
 });
 
-describe("a Copilot Chat account without Copilot Studio (this fork's default path)", () => {
+describe("a Copilot Chat account (Copilot Studio support is removed from this fork)", () => {
   const chatArg = (server: StubServer) => server.last().frames.find((f) => f.type === 4).arguments[0];
 
-  it("sends a default-model tool turn agent-less, on the relay framing, with no Bing and no Studio calls", async () => {
+  it("sends a default-model tool turn agent-less, on the relay framing, with no Bing", async () => {
     stub = await startStubCopilot({ respond: () => [botMessage("```bash\nls\n```"), completion()] });
-    const resolveAgent = vi.fn(async () => "T_should_not_be_used");
-    // What runtime.ts starts when studioAgent is off: no resolveAgent at all.
-    const { url } = await start({ resolveAgent: undefined });
+    const { url } = await start();
     const body: any = await (
       await post(url, { messages: [{ role: "user", content: "list the files" }], tools: [bashTool] })
     ).json();
@@ -315,7 +312,6 @@ describe("a Copilot Chat account without Copilot Studio (this fork's default pat
     expect(arg.plugins).toBeUndefined();
     expect(arg.message.text).toMatch(/guide me through this from my terminal/);
     expect(arg.message.text).toContain("bash_tool, create_file, str_replace, view");
-    expect(resolveAgent).not.toHaveBeenCalled();
     // The model's fenced reply still comes back to opencode as a real tool call.
     expect(body.choices[0].message.tool_calls?.[0]?.function?.name).toBe("bash");
   });
@@ -326,14 +322,14 @@ describe("Bing web search on coding turns", () => {
 
   it("is not offered unless the proxy was started with webSearch", async () => {
     stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-    const { url } = await start({ resolveAgent: undefined });
+    const { url } = await start();
     await post(url, { model: "quick", messages: [{ role: "user", content: "hi" }] });
     expect(chatArg(stub).plugins).toBeUndefined();
   });
 
-  it("is offered on agent-less turns when the proxy opts in", async () => {
+  it("is offered when the proxy opts in", async () => {
     stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-    const { url } = await start({ resolveAgent: undefined, webSearch: true });
+    const { url } = await start({ webSearch: true });
     await post(url, { model: "quick", messages: [{ role: "user", content: "hi" }] });
     expect(chatArg(stub).plugins).toEqual([{ Id: "BingWebSearch", Source: "BuiltIn" }]);
   });
@@ -345,7 +341,7 @@ describe("request parsing", () => {
     const parse = vi.spyOn(ChatCompletionRequest, "parse");
     try {
       stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-      const { url } = await start({ resolveAgent: undefined });
+      const { url } = await start();
       await post(url, { model: "quick", messages: [{ role: "user", content: "hi" }] });
       expect(parse).toHaveBeenCalled();
       for (const call of parse.mock.calls) expect(call[1]).toEqual({ jitless: true });
@@ -428,32 +424,17 @@ describe("trimming the toolset the model sees", () => {
   });
 });
 
-describe("agent attachment", () => {
-  it("attaches the declarative agent when the request carries tools", async () => {
+describe("no Copilot Studio agent", () => {
+  it("never attaches one, with tools or without", async () => {
     stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
     const { url } = await start();
     await post(url, { messages: [{ role: "user", content: "hi" }], tools: [bashTool] });
-    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].threadLevelGptId).toBeDefined();
-  });
-
-  it("leaves plain chat agent-less, so the tone actually selects the model", async () => {
-    // With an agent attached a non-default tone silently routes to GPT-5 anyway.
-    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-    const { url } = await start();
     await post(url, { model: "claude-sonnet", messages: [{ role: "user", content: "hi" }] });
-    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].threadLevelGptId).toBeUndefined();
-  });
-
-  it("still answers when the agent cannot be provisioned", async () => {
-    // No Copilot Studio access is a degraded mode, not a dead one.
-    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-    const { url } = await start({
-      resolveAgent: async () => {
-        throw new Error("403 Forbidden");
-      },
-    });
-    const response = await post(url, { messages: [{ role: "user", content: "hi" }], tools: [bashTool] });
-    expect(response.status).toBe(200);
+    for (const connection of stub.connections) {
+      const arg = connection.frames.find((f) => f.type === 4).arguments[0];
+      expect(arg.threadLevelGptId).toBeUndefined();
+      expect(arg.gpts).toBeUndefined();
+    }
   });
 });
 
@@ -822,19 +803,19 @@ describe("telling the model what ran", () => {
 describe("tool turns per tone", () => {
   const chatArg = () => stub!.last().frames.find((f) => f.type === 4).arguments[0];
 
-  it("keeps the agent for a reasoning GPT tone, framed as a relay", async () => {
+  it("frames a reasoning GPT tone as a relay", async () => {
     stub = await startStubCopilot({ respond: () => [streamItem("```bash\nls\n```"), completion()] });
     const { url } = await start();
     await post(url, { model: "gpt-5.5-think-deeper", messages: [{ role: "user", content: "list" }], tools: [bashTool] });
-    expect(chatArg().threadLevelGptId).toBeDefined();
+    expect(chatArg().threadLevelGptId).toBeUndefined();
     expect(chatArg().message.text).toMatch(/guide me through this from my terminal/);
   });
 
-  it("leaves the default model as it was", async () => {
+  it("leaves a chat tone on the default framing", async () => {
     stub = await startStubCopilot({ respond: () => [streamItem("```bash\nls\n```"), completion()] });
     const { url } = await start();
     await post(url, { model: "quick", messages: [{ role: "user", content: "list" }], tools: [bashTool] });
-    expect(chatArg().threadLevelGptId).toBeDefined();
+    expect(chatArg().threadLevelGptId).toBeUndefined();
     expect(chatArg().message.text).not.toMatch(/guide me through/);
   });
 });
@@ -851,7 +832,6 @@ describe("the turn log", () => {
     expect(entries[0]).toMatchObject({
       model: "quick",
       tone: "Gpt_5_5_Chat",
-      agent: true,
       tools: ["bash"],
       reply: "```bash\nls\n```",
       toolCalls: ["bash"],
@@ -1027,38 +1007,32 @@ describe("lifecycle", () => {
     proxy = undefined;
     await expect(fetch(`${url}/health`)).rejects.toThrow();
   });
+});
 
-  it("resolves the agent once and reuses it", async () => {
+describe("live settings", () => {
+  it("reads the settings on every request, so a change applies from the next message", async () => {
     stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-    const resolveAgent = vi.fn(async () => "T_t.b.gpt.default");
-    const { url } = await start({ resolveAgent });
-    await post(url, { messages: [{ role: "user", content: "a" }], tools: [bashTool] });
-    await post(url, { messages: [{ role: "user", content: "b" }], tools: [bashTool] });
-    expect(resolveAgent).toHaveBeenCalledTimes(1);
+    let current = { workIq: "hold" as const, webSearch: false, lean: true, leanSystemPrompt: false };
+    const { url } = await start({ settings: () => current });
+    await post(url, { model: "quick", messages: [{ role: "user", content: "first" }] });
+    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].plugins).toBeUndefined();
+    current = { ...current, webSearch: true };
+    await post(url, { model: "quick", messages: [{ role: "user", content: "second" }] });
+    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].plugins).toEqual([{ Id: "BingWebSearch", Source: "BuiltIn" }]);
   });
 
-  it("retries agent resolution after a transient failure instead of caching it forever", async () => {
+  it("swaps in the short system prompt only while that setting is on", async () => {
     stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-    const resolveAgent = vi
-      .fn<() => Promise<string | null>>()
-      .mockRejectedValueOnce(new Error("fetch failed: ECONNRESET"))
-      .mockResolvedValue("T_t.b.gpt.default");
-    const { url } = await start({ resolveAgent });
-    await post(url, { messages: [{ role: "user", content: "a" }], tools: [bashTool] });
-    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].threadLevelGptId).toBeUndefined();
-    await post(url, { messages: [{ role: "user", content: "b" }], tools: [bashTool] });
-    expect(resolveAgent).toHaveBeenCalledTimes(2);
-    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].threadLevelGptId).toBeDefined();
-  });
-
-  it("stops retrying once Copilot Studio says the account has no access", async () => {
-    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
-    const resolveAgent = vi.fn(async (): Promise<string | null> => {
-      throw Object.assign(new Error("M365 rejected listing agents (HTTP 403)"), { status: 403 });
-    });
-    const { url } = await start({ resolveAgent });
-    await post(url, { messages: [{ role: "user", content: "a" }], tools: [bashTool] });
-    await post(url, { messages: [{ role: "user", content: "b" }], tools: [bashTool] });
-    expect(resolveAgent).toHaveBeenCalledTimes(1);
+    let current = { workIq: "hold" as const, webSearch: false, lean: true, leanSystemPrompt: true };
+    const { url } = await start({ settings: () => current });
+    const messages = [
+      { role: "system", content: "You are opencode. A very long and polished prompt about many things." },
+      { role: "user", content: "hi" },
+    ];
+    await post(url, { model: "quick", messages, tools: [bashTool] });
+    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].message.text).toContain("You are a coding agent working in the user's real workspace");
+    current = { ...current, leanSystemPrompt: false };
+    await post(url, { model: "quick", messages: [...messages.slice(0, 1), { role: "user", content: "again" }], tools: [bashTool] });
+    expect(stub.last().frames.find((f) => f.type === 4).arguments[0].message.text).not.toContain("You are a coding agent working in the user's real workspace");
   });
 });

@@ -1,18 +1,22 @@
 /*
- * Gateway monitor page. Plain JavaScript with no dependencies and nothing loaded from
- * anywhere but the gateway itself.
+ * The Microsoft Copilot gateway's page. Plain JavaScript with no dependencies and
+ * nothing loaded from anywhere but the gateway itself.
  *
- * Everything shown here came from opencode, from Copilot, or from files the agent
- * read, so all of it is untrusted text: it only ever reaches the page through
- * textContent and text nodes, never as HTML. (The page's content security policy
- * would stop a script from running anyway; this makes sure markup never renders.)
+ * Four tabs: Set up (sign in, a test message, connecting OpenCode), Traffic (every
+ * turn, laid out across the border between this machine and Microsoft 365), Checks
+ * (everything the gateway checked), and Settings.
  *
- * The page's key arrives in the link's fragment (#k=…), which browsers do not send
- * to servers. It is moved into this tab's session storage — so a reload still works
- * and closing the tab forgets it — and taken out of the address bar.
+ * Everything shown came from OpenCode, from Copilot, or from files the agent read, so
+ * all of it is untrusted text: it only ever reaches the page through text nodes,
+ * never as HTML. (The page's content security policy would stop a script from
+ * running anyway; this makes sure markup never even renders.)
+ *
+ * The page's key arrives in the link's fragment (#k=…), which browsers do not send to
+ * servers. It is moved into this tab's session storage — so a reload still works and
+ * closing the tab forgets it — and taken out of the address bar.
  */
 
-// --- pure helpers (unit-tested in monitor-ui.test.ts) --------------------------------
+// --- pure helpers (unit-tested in ui.test.ts) -------------------------------------------
 
 /** Split a text/event-stream buffer into complete blocks and the unfinished rest. */
 export function splitBlocks(buffer) {
@@ -41,7 +45,7 @@ export function parseBlock(block) {
 }
 
 export function createState() {
-  return { facts: null, limits: null, turns: new Map(), order: [], checks: [] };
+  return { facts: null, limits: null, setup: false, turns: new Map(), order: [], checks: [] };
 }
 
 function resetTurns(state) {
@@ -68,7 +72,8 @@ function attemptOf(turn, n) {
 
 /**
  * Fold one event into the state. Returns what changed: "*" for everything, a turn id,
- * "checks" for a check with no turn, or null for nothing visible.
+ * "checks" for a check with no turn, "app" for a change on the Set up or Settings
+ * side, or null for nothing visible.
  */
 export function applyEvent(state, event) {
   if (!event || typeof event !== "object") return null;
@@ -76,6 +81,7 @@ export function applyEvent(state, event) {
     case "hello":
       state.facts = event.facts ?? null;
       state.limits = event.limits ?? null;
+      state.setup = event.setup === true;
       resetTurns(state);
       return "*";
     case "cleared":
@@ -83,6 +89,8 @@ export function applyEvent(state, event) {
       return "*";
     case "live":
       return null;
+    case "app-changed":
+      return "app";
     case "title": {
       const id = `title-${event.seq}`;
       const turn = turnFor(state, id, event.at);
@@ -128,9 +136,14 @@ const ERROR_LABELS = {
   m365_not_served: "Copilot did not serve this model",
   m365_turn_rejected: "Copilot rejected the turn",
   authentication_required: "Sign-in needed",
-  cancelled: "Cancelled by opencode",
+  cancelled: "Cancelled by OpenCode",
   upstream_error: "Connection to Copilot failed",
 };
+
+/** The connection test's sessions are named so they can be labelled here. */
+export function isTestSession(session) {
+  return typeof session === "string" && session.startsWith("connection-test-");
+}
 
 /** The one line that names a tool call: the command, the file, the pattern. */
 export function describeCall(call) {
@@ -171,7 +184,8 @@ export function summarizeTurn(turn) {
 
   const meta = [];
   if (turn.request) meta.push(turn.request.model);
-  if (turn.request?.session) meta.push(`session ${shortId(turn.request.session)}`);
+  if (isTestSession(turn.request?.session)) meta.push("Test message");
+  else if (turn.request?.session) meta.push(`session ${shortId(turn.request.session)}`);
   const end = turn.result || turn.error ? turn.lastAt : null;
   if (end && turn.request) meta.push(formatDuration(Date.parse(end) - Date.parse(turn.request.at)));
   if (turn.attempts.length > 1) meta.push("asked twice");
@@ -185,6 +199,12 @@ function flagFor(check) {
   if (check.check === "secrets") return { label: "Key-like text", tone: "warn" };
   if (check.check === "work-data") return { label: "Searched", tone: "warn" };
   return { label: "Flagged", tone: "warn" };
+}
+
+/** Which tab to open on: Set up until you are signed in and OpenCode is connected. */
+export function landingTab(app) {
+  if (!app) return "turns";
+  return app.account && app.opencode?.connected ? "turns" : "setup";
 }
 
 export function shortId(id) {
@@ -217,7 +237,7 @@ export function countLines(text) {
   return lines;
 }
 
-// --- the page ---------------------------------------------------------------------------
+// --- words ------------------------------------------------------------------------------
 
 const CHECK_LABELS = {
   egress: "Outbound connection",
@@ -245,6 +265,115 @@ const GROUNDING_WORDS = { work: "Work data", web: "Web", unknown: "Unplaced" };
 
 const ROLE_LABELS = { system: "System prompt", developer: "Developer instructions", user: "You", assistant: "Assistant (replayed)", tool: "Tool result" };
 
+const PURPOSE_WORDS = { auth: "signing in", chat: "Copilot" };
+
+/** What to do about a failed test message, by the code the gateway gave it. */
+const TEST_ADVICE = {
+  authentication_required: "Sign in again (step 1), then send another test.",
+  m365_throttled: "Microsoft is limiting this account for now. Wait a while before trying again; retrying sooner makes it last longer.",
+  m365_not_served: "Your account can't use that model. Try GPT-6.1 Sol.",
+  m365_turn_rejected: "Copilot no longer offers that model. Try GPT-6.1 Sol.",
+  m365_disengaged: "Copilot declined to answer. Send the test again.",
+  m365_work_data_held: "Copilot used your work data, so the gateway held the reply. See Settings, under Your data.",
+  upstream_error: "The gateway could not reach Copilot. Check this computer's network connection.",
+};
+
+/** The Settings tab: every setting, in plain words. Values are what the gateway reads. */
+const SETTING_GROUPS = [
+  {
+    title: "Your data",
+    items: [
+      {
+        key: "workIq",
+        name: "When Copilot uses your work data (Work IQ)",
+        help: "If your account has Work IQ, Copilot can draw on your email, files, chats and meetings. The gateway never asks for that, and checks every reply for signs of it. Holding means OpenCode gets an error instead of that reply.",
+        options: [
+          ["hold", "Hold the reply (recommended)"],
+          ["flag", "Let it through, and flag it in Checks"],
+          ["allow", "Let it through"],
+        ],
+      },
+      {
+        key: "webSearch",
+        name: "Bing web search",
+        help: "With it on, Copilot may turn parts of your code into Bing searches.",
+        options: [
+          [false, "Off (recommended)"],
+          [true, "On"],
+        ],
+      },
+    ],
+  },
+  {
+    title: "How the gateway talks to Copilot",
+    items: [
+      {
+        key: "lean",
+        name: "Trim OpenCode's tools",
+        help: "Copilot stops answering when it is offered a dozen tools or more, so the gateway passes on only the core ones: run a command, read, write, edit, patch and search.",
+        options: [
+          [true, "On (recommended)"],
+          [false, "Off"],
+        ],
+      },
+      {
+        key: "localTitles",
+        name: "Write session titles on this computer",
+        help: "OpenCode asks the model to title every new session. Answering here saves a Copilot conversation each time, which keeps you clear of Microsoft's limits.",
+        options: [
+          [true, "On (recommended)"],
+          [false, "Off"],
+        ],
+      },
+      {
+        key: "leanSystemPrompt",
+        name: "Short system prompt",
+        tag: "experimental",
+        help: "Replaces OpenCode's long instructions to the model with six short lines. It can help Copilot use tools, but your project's own AGENTS.md rules may not reach it.",
+        options: [
+          [false, "Off"],
+          [true, "On"],
+        ],
+      },
+      {
+        key: "setDefaultModel",
+        name: "Default model in OpenCode",
+        help: "Use m365/gpt-6.1-sol when you haven't picked a model in OpenCode.",
+        options: [
+          [true, "On"],
+          [false, "Off"],
+        ],
+      },
+    ],
+  },
+  {
+    title: "This page and signing in",
+    items: [
+      {
+        key: "pageWithOpenCode",
+        name: "When OpenCode starts",
+        help: "OpenCode runs its own copy of the gateway. Turn this on to watch OpenCode's turns on a page like this one. Either way, nothing is kept after OpenCode stops.",
+        applies: "next start",
+        options: [
+          ["off", "Don't start this page"],
+          ["on", "Start it (open it with opencode-m365 open)"],
+          ["open", "Start it and open it in the browser"],
+        ],
+      },
+      {
+        key: "signInBrowser",
+        name: "Browser for signing in",
+        help: "A browser you already have. Sign-in happens in a separate window with its own profile, so it never touches your everyday browsing.",
+        options: [
+          ["auto", "Edge, or Chrome if Edge isn't installed"],
+          ["msedge", "Microsoft Edge"],
+          ["chrome", "Google Chrome"],
+        ],
+      },
+    ],
+  },
+];
+
 /** Payloads longer than this are clipped until asked for. */
 const CLIP_LINES = 40;
 const CLIP_CHARS = 8000;
@@ -257,40 +386,69 @@ function h(tag, attrs, ...children) {
     else if (key.startsWith("on")) element.addEventListener(key.slice(2), value);
     else element.setAttribute(key, value === true ? "" : String(value));
   }
-  for (const child of children.flat()) {
-    if (child === null || child === undefined || child === false) continue;
-    element.append(child instanceof Node ? child : String(child));
-  }
+  for (const child of present(children)) element.append(child instanceof Node ? child : String(child));
   return element;
 }
+
+/** Replace an element's contents. Like h(), it skips empty children and flattens lists. */
+function fill(element, ...children) {
+  element.replaceChildren(...present(children));
+}
+
+function present(children) {
+  return children.flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false);
+}
+
+// --- the page ---------------------------------------------------------------------------
 
 function boot() {
   const state = createState();
   const ui = {
     linkState: document.getElementById("link-state"),
-    facts: document.getElementById("facts"),
+    who: document.getElementById("who"),
     follow: document.getElementById("follow"),
     pause: document.getElementById("pause"),
     clear: document.getElementById("clear"),
     list: document.getElementById("turn-list"),
     turn: document.getElementById("turn"),
-    viewTurns: document.getElementById("view-turns"),
-    viewChecks: document.getElementById("view-checks"),
-    turnsView: document.getElementById("turns-view"),
-    checksView: document.getElementById("checks-view"),
+    tabs: {
+      setup: document.getElementById("view-setup"),
+      turns: document.getElementById("view-turns"),
+      checks: document.getElementById("view-checks"),
+      settings: document.getElementById("view-settings"),
+    },
+    views: {
+      setup: document.getElementById("setup-view"),
+      turns: document.getElementById("turns-view"),
+      checks: document.getElementById("checks-view"),
+      settings: document.getElementById("settings-view"),
+    },
     checkRows: document.getElementById("check-rows"),
   };
-  const view = { selected: null, follow: true, paused: false, queue: [], arrived: new Set(), expanded: new Set(), collapsed: new Set() };
-  const dirty = { all: true, turns: new Set(), checks: true, facts: true };
+  const view = {
+    tab: "turns",
+    landed: false,
+    selected: null,
+    follow: true,
+    paused: false,
+    queue: [],
+    arrived: new Set(),
+    expanded: new Set(),
+    collapsed: new Set(),
+    saved: null,
+  };
+  const app = { state: null, error: null, fetching: null, again: false };
+  const dirty = { all: true, turns: new Set(), checks: true, app: true };
   let frame = 0;
 
   const token = takeToken();
   if (!token) {
-    setLinkState("refused", "This page needs its key. Open it from the link that `opencode-m365 monitor` prints.");
+    setLinkState("refused", "This page needs its key. Open it from the link that `opencode-m365 start` or `opencode-m365 open` gives you.");
     render();
     return;
   }
 
+  for (const [name, tab] of Object.entries(ui.tabs)) tab.addEventListener("click", () => showView(name));
   ui.follow.addEventListener("change", () => {
     view.follow = ui.follow.checked;
     if (view.follow && state.order.length > 0) select(state.order[state.order.length - 1]);
@@ -317,8 +475,6 @@ function boot() {
       ui.clear.disabled = false;
     }
   });
-  ui.viewTurns.addEventListener("click", () => showView("turns"));
-  ui.viewChecks.addEventListener("click", () => showView("checks"));
   ui.list.addEventListener("keydown", (event) => {
     const ids = state.order;
     if (ids.length === 0) return;
@@ -333,7 +489,7 @@ function boot() {
 
   connect();
 
-  // --- stream ---
+  // --- the live stream ---
 
   async function connect() {
     let delay = 1000;
@@ -343,7 +499,7 @@ function boot() {
         const response = await fetch("/events", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
         if (response.status === 401) {
           forgetToken();
-          setLinkState("refused", "The key in this link is not the gateway's. It changes every launch: run `opencode-m365 monitor` for the current link.");
+          setLinkState("refused", "This link's key is out of date: the key changes every time the gateway starts. Run `opencode-m365 open` for the current link.");
           return;
         }
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
@@ -372,8 +528,8 @@ function boot() {
   }
 
   function receive(event) {
-    // A fresh snapshot and a clear always apply, even when paused.
-    if (view.paused && event.kind !== "hello" && event.kind !== "cleared") {
+    // A fresh snapshot, a clear and Set up changes always apply, even when paused.
+    if (view.paused && !["hello", "cleared", "app-changed"].includes(event.kind)) {
       view.queue.push(event);
       setLinkState("paused", `Paused, ${view.queue.length} new`);
       return;
@@ -384,7 +540,12 @@ function boot() {
 
   function take(event) {
     const changed = applyEvent(state, event);
+    if (event.kind === "hello" && state.setup) refreshApp();
     if (changed === null) return;
+    if (changed === "app") {
+      refreshApp();
+      return;
+    }
     if (changed === "*") {
       // A reconnect replays the snapshot under the same ids, so the selection is kept;
       // a turn that is gone (after Clear) simply shows the empty state.
@@ -399,8 +560,88 @@ function boot() {
         if (view.follow) view.selected = changed;
       }
     }
-    if (event.kind === "hello") dirty.facts = true;
     schedule();
+  }
+
+  // --- the Set up and Settings state ---
+
+  async function api(path, body) {
+    const response = await fetch(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      cache: "no-store",
+    });
+    const value = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(value?.error || `The gateway answered ${response.status}.`);
+    return value;
+  }
+
+  /** Re-read the Set up state; coalesces bursts of change notices into one request. */
+  async function refreshApp() {
+    if (app.fetching) {
+      app.again = true;
+      return app.fetching;
+    }
+    app.fetching = (async () => {
+      do {
+        app.again = false;
+        try {
+          app.state = await api("/api/state");
+          app.error = null;
+        } catch (error) {
+          app.error = error.message;
+        }
+      } while (app.again);
+    })();
+    await app.fetching;
+    app.fetching = null;
+    if (!view.landed && app.state) {
+      view.landed = true;
+      showView(landingTab(app.state));
+    }
+    dirty.app = true;
+    schedule();
+  }
+
+  async function saveSetting(key, value) {
+    view.saved = { key, ok: true, text: "Saving…" };
+    dirty.app = true;
+    schedule();
+    try {
+      app.state = await api("/api/settings", { key, value });
+      view.saved = { key, ok: true, text: "Saved" };
+    } catch (error) {
+      view.saved = { key, ok: false, text: error.message };
+    }
+    dirty.app = true;
+    schedule();
+    setTimeout(() => {
+      if (view.saved?.key === key && view.saved.ok) {
+        view.saved = null;
+        dirty.app = true;
+        schedule();
+      }
+    }, 2500);
+  }
+
+  async function signIn() {
+    try {
+      app.state = await api("/api/sign-in", {});
+    } catch (error) {
+      app.error = error.message;
+    }
+    dirty.app = true;
+    schedule();
+  }
+
+  async function sendTest(model) {
+    try {
+      await api("/api/test", { model });
+    } catch (error) {
+      app.error = error.message;
+    }
+    await refreshApp();
   }
 
   // --- rendering ---
@@ -414,37 +655,43 @@ function boot() {
   }
 
   function render() {
-    if (dirty.facts) renderFacts();
+    // Keep keyboard focus where it was across a re-render: controls have stable ids.
+    const focused = document.activeElement?.id;
+    renderTabs();
+    renderWho();
     renderList();
     if (dirty.all || dirty.turns.has(view.selected)) renderTurn();
     if (dirty.all || dirty.checks) renderChecks();
+    if (dirty.all || dirty.app) {
+      renderSetup();
+      renderSettings();
+    }
     dirty.all = false;
     dirty.turns.clear();
     dirty.checks = false;
-    dirty.facts = false;
+    dirty.app = false;
+    if (focused && document.activeElement?.id !== focused) document.getElementById(focused)?.focus();
   }
 
-  function renderFacts() {
-    const facts = state.facts;
-    ui.facts.replaceChildren();
-    if (!facts) return;
-    const pair = (label, value) => h("div", null, h("dt", null, label), h("dd", null, value));
-    ui.facts.append(
-      pair("Proxy", facts.proxy.replace(/^https?:\/\//, "")),
-      pair("Default model", facts.defaultModel),
-      pair("Work data", { hold: "Held", flag: "Flagged", allow: "Allowed" }[facts.workIq] ?? facts.workIq),
-      pair("Bing web search", facts.webSearch ? "On" : "Off"),
-      pair("Copilot Studio agent", facts.studioAgent ? "On" : "Off"),
-      pair("Tool trimming", facts.lean ? "On" : "Off"),
-      pair("Gateway process", String(facts.pid)),
-    );
+  function renderTabs() {
+    ui.tabs.setup.hidden = !state.setup;
+    ui.tabs.settings.hidden = !state.setup;
+  }
+
+  function renderWho() {
+    const account = app.state?.account;
+    if (!state.setup || !app.state) {
+      fill(ui.who);
+      return;
+    }
+    fill(ui.who, account ? h("span", null, "Signed in as ", h("strong", null, account)) : "Not signed in");
   }
 
   function renderList() {
     const rows = state.order.map((id) => {
       const turn = state.turns.get(id);
       const summary = summarizeTurn(turn);
-      const row = h(
+      return h(
         "li",
         {
           class: `turn-row${view.arrived.has(id) ? " arrived" : ""}`,
@@ -458,12 +705,11 @@ function boot() {
         h("span", { class: "row-flags" }, summary.flags.slice(0, 2).map((flag) => h("span", { class: `flag ${flag.tone}` }, flag.label))),
         h("span", { class: "row-meta" }, [formatTime(turn.at), ...summary.meta].map((part) => h("span", null, part))),
       );
-      return row;
     });
     view.arrived.clear();
-    ui.list.replaceChildren(...rows);
+    fill(ui.list, ...rows);
     const selected = ui.list.querySelector('[aria-selected="true"]');
-    if (selected && view.follow) selected.scrollIntoView({ block: "nearest" });
+    if (selected && view.follow && view.tab === "turns") selected.scrollIntoView({ block: "nearest" });
   }
 
   function renderChecks() {
@@ -496,13 +742,327 @@ function boot() {
         ),
       ),
     );
-    ui.checkRows.replaceChildren(...rows);
+    fill(ui.checkRows, ...rows);
   }
+
+  // --- Set up ---
+
+  function renderSetup() {
+    const s = app.state;
+    if (!state.setup) return;
+    if (!s) {
+      fill(ui.views.setup, h("p", { class: "note" }, app.error ? `Could not load this page's state: ${app.error}` : "Loading…"));
+      return;
+    }
+    const inside = s.context === "opencode";
+    fill(ui.views.setup,
+      h("h2", null, "Set up"),
+      h(
+        "p",
+        { class: "lede" },
+        "This gateway lets OpenCode use Microsoft Copilot, on your work account, as its AI model. It runs on this computer.",
+      ),
+      h(
+        "div",
+        { class: "hosts" },
+        h("p", null, "It connects to exactly two addresses, both Microsoft's, and refuses every other:"),
+        h(
+          "ul",
+          null,
+          s.hosts.map((entry) => h("li", null, h("code", null, entry.host), ` for ${PURPOSE_WORDS[entry.purpose] ?? entry.purpose}`)),
+        ),
+        h("p", { class: "setting-note" }, "No analytics or usage reports go anywhere. The Checks tab lists every connection it makes."),
+      ),
+      app.error ? h("div", { class: "callout warn" }, app.error) : null,
+      h("ol", { class: "steps" }, signInStep(s), testStep(s), connectStep(s, inside), watchStep(s, inside)),
+    );
+  }
+
+  function step(number, done, title, ...body) {
+    return h(
+      "li",
+      { class: `step${done ? " done" : ""}` },
+      h("span", { class: "step-mark", "aria-hidden": "true" }, done ? "✓" : String(number)),
+      h("h3", null, title),
+      ...body,
+    );
+  }
+
+  function status(done, text) {
+    return h("p", { class: `step-status ${done ? "done" : "todo"}` }, text);
+  }
+
+  function signInStep(s) {
+    const signedIn = Boolean(s.account);
+    const body = [status(signedIn, signedIn ? `Signed in as ${s.account}.` : "Not signed in yet.")];
+    if (s.signIn.available) {
+      const browser = s.settings.signInBrowser;
+      body.push(
+        h("p", null, "Use your work or school account. A browser window opens on Microsoft's sign-in page; finish there, including any multi-factor prompt."),
+        h(
+          "div",
+          { class: "row" },
+          h("label", { for: "sign-in-browser" }, "Sign in with"),
+          h(
+            "select",
+            {
+              id: "sign-in-browser",
+              disabled: Boolean(browser.lockedBy) || s.signIn.running,
+              onchange: (event) => saveSetting("signInBrowser", event.currentTarget.value),
+            },
+            SETTING_GROUPS[2].items[1].options.map(([value, label]) => h("option", { value, selected: browser.value === value }, label)),
+          ),
+          h(
+            "button",
+            { type: "button", class: "primary", id: "sign-in", disabled: s.signIn.running, onclick: () => signIn() },
+            s.signIn.running ? "Waiting for you in the browser…" : signedIn ? "Sign in again" : "Sign in",
+          ),
+        ),
+        s.signIn.running ? h("p", { class: "note" }, "Finish signing in in the window that opened. This page updates by itself when you're done.") : null,
+        s.signIn.error ? h("div", { class: "callout warn" }, h("strong", null, "Sign-in didn't finish."), s.signIn.error) : null,
+        h("p", { class: "setting-note" }, "Only the sign-in token is kept, in a file only you can read. Your password never reaches the gateway."),
+      );
+    } else if (!signedIn) {
+      body.push(
+        h("p", null, "Signing in opens a browser window, which this page can't do from inside OpenCode. Run this in a terminal, then come back:"),
+        snippet("sign-in-command", s.signIn.command),
+      );
+    }
+    return step(1, signedIn, "Sign in to Microsoft 365", ...body);
+  }
+
+  function testStep(s) {
+    const last = s.test.last;
+    const ok = last?.ok === true;
+    const body = [
+      status(ok, ok ? "Copilot answered." : last ? "The last test didn't get through." : "Not sent yet."),
+      h("p", null, "Sends this one message to Copilot through the gateway, so you can see exactly what goes out and what comes back:"),
+      h("p", { class: "quote" }, s.test.prompt),
+      h(
+        "div",
+        { class: "row" },
+        h("label", { for: "test-model" }, "Model"),
+        h("select", { id: "test-model", disabled: s.test.running }, s.models.map((model) => h("option", { value: model.id, selected: model.id === (last?.model ?? s.defaultModel) }, model.name))),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            id: "send-test",
+            disabled: s.test.running || !s.account,
+            onclick: () => sendTest(document.getElementById("test-model").value),
+          },
+          s.test.running ? "Waiting for Copilot…" : "Send test message",
+        ),
+        !s.account ? h("span", { class: "note" }, "Sign in first.") : null,
+      ),
+    ];
+    if (s.test.running) body.push(h("p", { class: "note" }, "Reasoning models can take 10 to 30 seconds to answer."));
+    if (last && !s.test.running) {
+      if (last.ok) {
+        body.push(
+          h(
+            "div",
+            { class: "answer" },
+            h("p", null, `Copilot replied in ${formatDuration(last.ms)}:`),
+            h("p", { class: "quote" }, last.reply || "(an empty reply)"),
+            h("button", { type: "button", class: "link-button", onclick: () => showTestTurn(last.session) }, "See exactly what was sent and received"),
+          ),
+        );
+      } else {
+        body.push(
+          h(
+            "div",
+            { class: "callout warn" },
+            h("strong", null, "It didn't get through."),
+            last.error,
+            TEST_ADVICE[last.code] ? h("p", null, TEST_ADVICE[last.code]) : null,
+            h("button", { type: "button", class: "link-button", onclick: () => showTestTurn(last.session) }, "See the attempt in Traffic"),
+          ),
+        );
+      }
+    }
+    body.push(h("p", { class: "setting-note" }, "Each test starts a new Copilot conversation, and Microsoft limits how fast those can start, so one test is plenty."));
+    return step(2, ok, "Send a test message", ...body);
+  }
+
+  function connectStep(s, inside) {
+    const oc = s.opencode;
+    if (inside) return step(3, true, "Connect OpenCode", status(true, "Connected. This page is running inside OpenCode."));
+    const pluginsJson = JSON.stringify({ plugins: [oc.pluginDir] }, null, 2);
+    const quietJson = Object.entries(oc.quietSettings)
+      .map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)
+      .join(",\n");
+    const allQuiet = Object.values(oc.quiet).every(Boolean);
+    const overridden = oc.pluginOptions ? Object.keys(oc.pluginOptions).filter((key) => key !== "baseUrl" && key !== "apiKey") : [];
+    return step(
+      3,
+      oc.connected,
+      "Connect OpenCode",
+      status(oc.connected, oc.connected ? "Connected. OpenCode loads the gateway from this folder." : "Not connected yet."),
+      oc.problem ? h("div", { class: "callout warn" }, h("strong", null, "OpenCode's config file can't be read."), `${oc.configPath} is ${oc.problem}. Fix it first; the gateway won't change it.`) : null,
+      h("p", null, "Use the OpenCode you already have. Tell it about the gateway in its config file:"),
+      h(
+        "ol",
+        { class: "substeps" },
+        h("li", null, "Open OpenCode's config file. Create it if it isn't there.", snippet("opencode-config-path", oc.configPath)),
+        h(
+          "li",
+          null,
+          "Add this folder to its plugins. In a new file, this is all it needs. If the file already has a ",
+          h("code", null, "plugins"),
+          " list, add the folder's path to that list instead.",
+          snippet("opencode-plugins", pluginsJson),
+        ),
+        h(
+          "li",
+          null,
+          allQuiet
+            ? "Optional, and already done: OpenCode's own update checks, session sharing and web search are off."
+            : "Optional: to stop OpenCode's own outside traffic as well (update checks, session sharing and its web search), add these lines inside the same braces:",
+          allQuiet ? null : snippet("opencode-quiet", quietJson),
+        ),
+        h("li", null, "Start OpenCode in your project with ", h("code", null, "opencode"), ". Models starting with m365/ come from the gateway; m365/gpt-6.1-sol is used when you haven't picked one."),
+      ),
+      overridden.length
+        ? h("p", { class: "setting-note locked" }, `OpenCode's config also sets ${overridden.join(", ")} for the gateway. Inside OpenCode those win over this page's Settings.`)
+        : null,
+      h("p", { class: "setting-note" }, "Rather run a command? ", h("code", null, "opencode-m365 setup --quiet"), " makes the same change and saves a backup of your config. This page never edits it."),
+    );
+  }
+
+  function watchStep(s, inside) {
+    const setting = s.settings.pageWithOpenCode;
+    const on = setting.value !== "off";
+    return step(
+      4,
+      inside || on,
+      "See what OpenCode sends (optional)",
+      inside
+        ? status(true, "You're looking at it: this page belongs to the gateway inside OpenCode.")
+        : status(on, setting.value === "open" ? "This page opens when OpenCode starts." : on ? "This page starts with OpenCode." : "Off."),
+      inside ? null : h("p", null, "OpenCode runs its own copy of the gateway, so its turns show on that copy's page, not this one. Choose what happens when OpenCode starts:"),
+      inside ? null : choiceControl(SETTING_GROUPS[2].items[0], setting, "watch"),
+      inside ? null : h("p", { class: "setting-note" }, "If the page doesn't open by itself, run ", h("code", null, "opencode-m365 open"), "."),
+    );
+  }
+
+  function showTestTurn(session) {
+    const id = state.order.find((candidate) => state.turns.get(candidate)?.request?.session === session);
+    if (id) {
+      setFollow(false);
+      select(id);
+    }
+    showView("turns");
+  }
+
+  /** A block of text to copy, with its button. */
+  function snippet(id, text) {
+    const pre = h("pre", { id: `${id}-text` }, text);
+    const button = navigator.clipboard?.writeText
+      ? h(
+          "button",
+          {
+            type: "button",
+            id: `${id}-copy`,
+            onclick: async (event) => {
+              const target = event.currentTarget;
+              try {
+                await navigator.clipboard.writeText(text);
+                target.textContent = "Copied";
+              } catch {
+                target.textContent = "Copy failed";
+              }
+              setTimeout(() => (target.textContent = "Copy"), 1500);
+            },
+          },
+          "Copy",
+        )
+      : null;
+    return h("div", { class: "snippet" }, pre, button);
+  }
+
+  // --- Settings ---
+
+  function renderSettings() {
+    const s = app.state;
+    if (!state.setup) return;
+    if (!s) {
+      fill(ui.views.settings, h("p", { class: "note" }, app.error ? `Could not load the settings: ${app.error}` : "Loading…"));
+      return;
+    }
+    fill(ui.views.settings,
+      h("h2", null, "Settings"),
+      h(
+        "p",
+        { class: "lede" },
+        "Saved on this computer and used by every copy of the gateway, including the one inside OpenCode. Changes apply from the next message, except where a setting says otherwise.",
+      ),
+      SETTING_GROUPS.map((group) =>
+        h(
+          "section",
+          { class: "settings-group" },
+          h("h3", null, group.title),
+          group.items.map((item) => settingRow(item, s.settings[item.key])),
+        ),
+      ),
+      h("p", { class: "setting-note" }, "Saved in ", h("code", null, s.settingsFile), " (readable only by you)."),
+    );
+  }
+
+  function settingRow(item, setting) {
+    const note = setting.lockedBy
+      ? h("p", { class: "setting-note locked" }, `Set by ${setting.lockedBy}. Change it there.`)
+      : item.applies === "next start"
+        ? h("p", { class: "setting-note" }, "Applies the next time OpenCode starts.")
+        : null;
+    return h(
+      "div",
+      { class: "setting" },
+      h(
+        "div",
+        null,
+        h("p", { class: "setting-name", id: `setting-${item.key}-name` }, item.name, item.tag ? h("span", { class: "tag" }, item.tag) : null),
+        h("p", { class: "setting-help" }, item.help),
+        note,
+      ),
+      choiceControl(item, setting, "setting"),
+    );
+  }
+
+  /** The radio group for one setting; saves on change. */
+  function choiceControl(item, setting, prefix) {
+    const saved = view.saved?.key === item.key ? view.saved : null;
+    return h(
+      "fieldset",
+      { class: "choices", "aria-labelledby": prefix === "setting" ? `setting-${item.key}-name` : null, "aria-label": prefix === "setting" ? null : item.name },
+      item.options.map(([value, label]) => {
+        const id = `${prefix}-${item.key}-${String(value)}`;
+        return h(
+          "label",
+          { for: id },
+          h("input", {
+            type: "radio",
+            id,
+            name: `${prefix}-${item.key}`,
+            value: String(value),
+            checked: setting.value === value,
+            disabled: Boolean(setting.lockedBy),
+            onchange: () => saveSetting(item.key, value),
+          }),
+          label,
+        );
+      }),
+      h("span", { class: `saved${saved && !saved.ok ? " failed" : ""}`, role: "status" }, saved ? saved.text : ""),
+    );
+  }
+
+  // --- Traffic: one turn ---
 
   function renderTurn() {
     const turn = state.turns.get(view.selected);
     if (!turn) {
-      ui.turn.replaceChildren(
+      fill(ui.turn,
         h(
           "div",
           { class: "empty" },
@@ -511,17 +1071,19 @@ function boot() {
             "p",
             null,
             state.order.length
-              ? "Choose a turn on the left to see what opencode sent, what went to Copilot, and what came back."
-              : "Use opencode with an m365 model. Each request appears here as it happens: what opencode sent, the exact text Copilot received, its reply, and what the gateway checked.",
+              ? "Choose a turn on the left to see what OpenCode sent, what went to Copilot, and what came back."
+              : state.setup
+                ? "Send a test message from Set up, or use OpenCode with an m365 model. Each request appears here as it happens: what was sent, the exact text Copilot received, its reply, and what the gateway checked."
+                : "Use OpenCode with an m365 model. Each request appears here as it happens: what was sent, the exact text Copilot received, its reply, and what the gateway checked.",
           ),
         ),
       );
       return;
     }
     if (turn.kind === "title") {
-      ui.turn.replaceChildren(
+      fill(ui.turn,
         h("header", { class: "turn-head" }, h("h2", null, "Session title, made locally"), h("p", { class: "turn-meta" }, h("span", null, formatTime(turn.at)))),
-        h("p", { class: "note" }, `opencode asked for a session title. The gateway wrote one itself ("${turn.title.title}") instead of asking Copilot, because every extra Copilot conversation counts toward Microsoft's throttle. Nothing left this machine.`),
+        h("p", { class: "note" }, `OpenCode asked for a session title. The gateway wrote one itself ("${turn.title.title}") instead of asking Copilot, because every extra Copilot conversation counts toward Microsoft's limits. Nothing left this machine.`),
       );
       return;
     }
@@ -529,24 +1091,24 @@ function boot() {
     const summary = summarizeTurn(turn);
     const meta = [formatTime(turn.at), ...summary.meta];
     const steps = [h("div", { class: "ledger-head", "aria-hidden": "true" }, h("span", null, "This machine"), h("span", null), h("span", null, "Microsoft 365"))];
-    if (turn.request) steps.push(step("local", null, requestEntry(turn)));
+    if (turn.request) steps.push(ledgerStep("local", null, requestEntry(turn)));
     for (const attempt of turn.attempts) {
-      if (attempt.send) steps.push(step("remote", "→", sendEntry(turn, attempt)));
-      if (attempt.activity.length) steps.push(step("remote", null, activityEntry(attempt)));
-      if (attempt.reply) steps.push(step("remote", null, replyEntry(attempt)));
+      if (attempt.send) steps.push(ledgerStep("remote", "→", sendEntry(turn, attempt)));
+      if (attempt.activity.length) steps.push(ledgerStep("remote", null, activityEntry(attempt)));
+      if (attempt.reply) steps.push(ledgerStep("remote", null, replyEntry(attempt)));
     }
-    steps.push(step("local", turn.result || turn.error ? "←" : null, outcomeEntry(turn)));
+    steps.push(ledgerStep("local", turn.result || turn.error ? "←" : null, outcomeEntry(turn)));
 
-    ui.turn.replaceChildren(
+    fill(ui.turn,
       h("header", { class: "turn-head" }, h("h2", null, summary.what), h("p", { class: "turn-meta" }, meta.map((part) => h("span", null, part)))),
       h("div", { class: "ledger" }, steps),
       checksSection(turn),
     );
   }
 
-  function step(side, arrow, entry) {
+  function ledgerStep(side, arrow, entry) {
     entry.classList.add(side);
-    return h("div", { class: "step" }, entry, arrow ? h("span", { class: "cross", "aria-hidden": "true", title: arrow === "→" ? "Sent to Microsoft" : "Back on this machine" }, arrow) : null);
+    return h("div", { class: "step-row" }, entry, arrow ? h("span", { class: "cross", "aria-hidden": "true", title: arrow === "→" ? "Sent to Microsoft" : "Back on this machine" }, arrow) : null);
   }
 
   function requestEntry(turn) {
@@ -558,7 +1120,7 @@ function boot() {
     return h(
       "section",
       { class: "entry" },
-      h("h3", null, "opencode sent"),
+      h("h3", null, isTestSession(request.session) ? "The test message" : "OpenCode sent"),
       h(
         "dl",
         { class: "kv" },
@@ -566,7 +1128,7 @@ function boot() {
         h("dd", null, request.tone ? `${request.model} (${request.tone})` : request.model),
         h("dt", null, "Messages"),
         h("dd", null, `${request.total} in the request, ${request.alreadySent} already with Copilot, ${fresh} new`),
-        request.session ? [h("dt", null, "Session"), h("dd", null, request.session)] : null,
+        request.session && !isTestSession(request.session) ? [h("dt", null, "Session"), h("dd", null, request.session)] : null,
         h("dt", null, "Tools passed on"),
         h("dd", null, kept.length ? kept.join(", ") : "none"),
         left.length ? [h("dt", null, "Tools left out"), h("dd", null, left.join(", "))] : null,
@@ -671,7 +1233,8 @@ function boot() {
   }
 
   function outcomeEntry(turn) {
-    const parts = [h("h3", null, "Handed to opencode")];
+    const test = isTestSession(turn.request?.session);
+    const parts = [h("h3", null, test ? "Back on the Set up page" : "Handed to OpenCode")];
     if (turn.error) {
       const held = turn.error.code === "m365_work_data_held";
       parts.push(
@@ -685,12 +1248,12 @@ function boot() {
     } else if (turn.result) {
       const result = turn.result;
       if (result.toolCalls.length) {
-        parts.push(h("p", { class: "note" }, result.toolCalls.length === 1 ? "A tool call, which opencode runs on this machine." : `${result.toolCalls.length} tool calls, which opencode runs on this machine.`));
+        parts.push(h("p", { class: "note" }, result.toolCalls.length === 1 ? "A tool call, which OpenCode runs on this machine." : `${result.toolCalls.length} tool calls, which OpenCode runs on this machine.`));
         result.toolCalls.forEach((call, index) => {
           parts.push(h("div", { class: "call" }, h("span", { class: "call-name" }, call.name), payload(`${turn.id}:c${index}`, call.arguments)));
         });
       } else {
-        parts.push(h("p", { class: "note" }, result.streamed ? "Text, streamed to opencode as it arrived." : "Text."), payload(`${turn.id}:t`, result.text || "(empty)"));
+        parts.push(h("p", { class: "note" }, result.streamed ? "Text, streamed as it arrived." : "Text."), payload(`${turn.id}:t`, result.text || "(empty)"));
       }
       if (result.skippedCalls) parts.push(h("p", { class: "note" }, `Copilot wrote ${result.skippedCalls} more ${result.skippedCalls === 1 ? "call" : "calls"}; only the first runs, since the rest were written before any result.`));
       if (result.inventedResult) parts.push(h("p", { class: "note" }, "Copilot also guessed the call's result; the guess was set aside."));
@@ -823,12 +1386,15 @@ function boot() {
   }
 
   function showView(name) {
-    const turns = name === "turns";
-    ui.turnsView.hidden = !turns;
-    ui.checksView.hidden = turns;
-    const [current, other] = turns ? [ui.viewTurns, ui.viewChecks] : [ui.viewChecks, ui.viewTurns];
-    current.setAttribute("aria-current", "page");
-    other.removeAttribute("aria-current");
+    if (!ui.views[name] || ui.tabs[name].hidden) name = "turns";
+    view.tab = name;
+    for (const [key, tab] of Object.entries(ui.tabs)) {
+      const current = key === name;
+      ui.views[key].hidden = !current;
+      if (current) tab.setAttribute("aria-current", "page");
+      else tab.removeAttribute("aria-current");
+    }
+    if ((name === "setup" || name === "settings") && state.setup) refreshApp();
   }
 
   function setLinkState(stateName, text) {
@@ -841,7 +1407,7 @@ function takeToken() {
   const match = /(?:^#|&)k=([A-Za-z0-9_-]+)/.exec(location.hash);
   if (match) {
     try {
-      sessionStorage.setItem("gateway-monitor-key", match[1]);
+      sessionStorage.setItem("gateway-page-key", match[1]);
     } catch {
       /* storage refused; the key lives for this page load only */
     }
@@ -849,7 +1415,7 @@ function takeToken() {
     return match[1];
   }
   try {
-    return sessionStorage.getItem("gateway-monitor-key");
+    return sessionStorage.getItem("gateway-page-key");
   } catch {
     return null;
   }
@@ -857,7 +1423,7 @@ function takeToken() {
 
 function forgetToken() {
   try {
-    sessionStorage.removeItem("gateway-monitor-key");
+    sessionStorage.removeItem("gateway-page-key");
   } catch {
     /* nothing kept */
   }

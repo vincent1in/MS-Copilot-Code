@@ -41,7 +41,7 @@ describe("the built monitor", () => {
       const timer = setTimeout(() => reject(new Error(`no monitor link in output:\n${out}`)), 15_000);
       child!.stdout!.on("data", (chunk) => {
         out += String(chunk);
-        const match = /monitor:\s+(http:\/\/127\.0\.0\.1:\d+\/#k=[A-Za-z0-9_-]+)/.exec(out);
+        const match = /page:\s+(http:\/\/127\.0\.0\.1:\d+\/#k=[A-Za-z0-9_-]+)/.exec(out);
         if (match) {
           clearTimeout(timer);
           resolve(match[1]!);
@@ -53,7 +53,7 @@ describe("the built monitor", () => {
     const base = link.split("#")[0]!;
     const page = await fetch(base);
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain("Gateway monitor");
+    expect(await page.text()).toContain("<title>Microsoft Copilot gateway</title>");
     expect((await fetch(`${base}monitor.js`)).status).toBe(200);
     expect((await fetch(`${base}events`)).status).toBe(401);
 

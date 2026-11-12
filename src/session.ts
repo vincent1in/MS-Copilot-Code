@@ -155,12 +155,10 @@ export interface CopilotSessionOptions {
 export interface TurnOptions {
   /** Selects the model. There is no model parameter in this protocol. */
   tone?: string;
-  /** Declarative agent id, when the turn needs server-side tool instructions. */
-  agentId?: string | null;
   /**
-   * Offer Copilot its built-in Bing web search plugin on an agent-less turn. Off by
-   * default in this fork: with it, Copilot may turn parts of the prompt — which on a
-   * coding turn includes your code — into Bing queries.
+   * Offer Copilot its built-in Bing web search plugin. Off by default in this fork:
+   * with it, Copilot may turn parts of the prompt — which on a coding turn includes
+   * your code — into Bing queries.
    */
   webSearch?: boolean;
   signal?: AbortSignal;
@@ -458,21 +456,9 @@ export class CopilotSession {
       traceId: randomUUID(),
     };
 
-    if (turn.agentId) {
-      // With an agent attached, the declarative-agent fields replace `plugins`.
-      argument.threadLevelGptId = { id: turn.agentId, source: "MOS3" };
-      argument.gpts = [
-        {
-          id: turn.agentId,
-          source: "MOS3",
-          version: "1.0.0",
-          clientOverrides: { capabilities: [], "deepResearchModels@odata.type": "Collection(String)" },
-        },
-      ];
-    } else if (turn.webSearch) {
-      // Opt-in only (see TurnOptions.webSearch). Upstream sent this on every
-      // agent-less turn; omitting it matches the request shape of an agent turn,
-      // which never carries `plugins`.
+    if (turn.webSearch) {
+      // Opt-in only (see TurnOptions.webSearch). Upstream sent this on every turn
+      // without a Copilot Studio agent; that agent is removed from this fork.
       argument.plugins = [{ Id: "BingWebSearch", Source: "BuiltIn" }];
     }
 
@@ -494,7 +480,7 @@ export class CopilotSession {
 
     log.info(
       "sending turn",
-      trunc({ tone: argument.tone, agent: Boolean(turn.agentId), images: outgoing.annotations.length, text }),
+      trunc({ tone: argument.tone, images: outgoing.annotations.length, text }),
     );
     // Both frames, one send. This is the part that silently breaks everything.
     socket.send(`${JSON.stringify(chat)}${RS}${JSON.stringify(metrics)}${RS}`);

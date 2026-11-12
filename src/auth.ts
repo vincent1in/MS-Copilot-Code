@@ -33,11 +33,6 @@ export const SYDNEY_SCOPES = [
   "https://substrate.office.com/sydney/sydney.readwrite",
 ];
 
-/** Copilot Studio agent management — acquired separately from the chat token. */
-export const POWERPLATFORM_SCOPE = "https://api.powerplatform.com/.default";
-/** Power Platform environment discovery. */
-export const BAP_SCOPE = "https://api.bap.microsoft.com/.default";
-
 /** Re-acquire this far ahead of expiry rather than racing the clock mid-turn. */
 const EXPIRY_MARGIN_MS = 120_000;
 
@@ -86,8 +81,11 @@ export interface MsalLike {
 export interface TokenClient {
   /** A Sydney chat token. */
   getToken(): Promise<string>;
-  /** A token for some other resource — agent management, environment discovery. */
-  getTokenForScope(scopes: string[]): Promise<string>;
+  /**
+   * The signed-in account's username, read from the token cache on disk — no network,
+   * and no claim that its refresh token still works. Undefined when nobody is signed in.
+   */
+  account(): Promise<string | undefined>;
   /** Forget cached tokens so the next call re-acquires. */
   invalidate(): void;
 }
@@ -152,7 +150,11 @@ export function createTokenClient(options: TokenClientOptions = {}): TokenClient
 
   return {
     getToken: () => acquire(SYDNEY_SCOPES),
-    getTokenForScope: (scopes) => acquire(scopes),
+    account: async () => {
+      const accounts = await (await client()).getTokenCache().getAllAccounts();
+      const username = accounts[0]?.username;
+      return typeof username === "string" && username !== "" ? username : undefined;
+    },
     invalidate: () => cache.clear(),
   };
 }

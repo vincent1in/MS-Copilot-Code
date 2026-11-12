@@ -2,11 +2,11 @@
  * The egress allowlist: the only hosts this package may send anything to.
  *
  * Every outbound request this package makes is checked here before a socket opens:
- * the chat WebSocket, the image upload, MSAL's token traffic (through
- * {@link createGuardedNetworkClient}), and Power Platform when the opt-in Copilot
- * Studio agent is enabled. Each call site names its purpose, so a token minted for
- * one service cannot be sent to another service's host, and a host learned from a
- * server response (the Power Platform environment) must still match a fixed pattern.
+ * the chat WebSocket, the image upload, and MSAL's token traffic (through
+ * {@link createGuardedNetworkClient}). Each call site names its purpose, so a token
+ * minted for one service cannot be sent to another service's host. There are exactly
+ * two hosts: Microsoft's sign-in service and Copilot. (Upstream's Copilot Studio agent,
+ * which also reached Power Platform, is removed from this fork.)
  *
  * Loopback is allowed for every purpose: the test suite points the client at a stub
  * on 127.0.0.1, and nothing on loopback leaves the machine.
@@ -23,22 +23,12 @@ import { createLogger } from "./log.js";
 
 const log = createLogger("egress");
 
-export type EgressPurpose = "auth" | "chat" | "studio";
+export type EgressPurpose = "auth" | "chat";
 
-/** `<environment id>.<2 chars>.environment.api.powerplatform.com`, nothing else. */
-const POWER_PLATFORM_ENVIRONMENT_HOST = /^[a-z0-9]{1,63}\.[a-z0-9]{2}\.environment\.api\.powerplatform\.com$/;
-
-const ALLOWED: Record<EgressPurpose, (host: string) => boolean> = {
-  auth: (host) => host === "login.microsoftonline.com",
-  chat: (host) => host === "substrate.office.com",
-  studio: (host) => host === "api.bap.microsoft.com" || POWER_PLATFORM_ENVIRONMENT_HOST.test(host),
-};
-
-/** Human-readable allowlist, for docs and `opencode-m365 doctor`. */
-export const ALLOWED_HOSTS: Readonly<Record<EgressPurpose, readonly string[]>> = {
-  auth: ["login.microsoftonline.com"],
-  chat: ["substrate.office.com"],
-  studio: ["api.bap.microsoft.com", "*.environment.api.powerplatform.com"],
+/** The allowlist, readable: for the docs, `doctor` and the app's Set up page. */
+export const ALLOWED_HOSTS: Readonly<Record<EgressPurpose, string>> = {
+  auth: "login.microsoftonline.com",
+  chat: "substrate.office.com",
 };
 
 export class EgressDeniedError extends Error {
@@ -52,11 +42,6 @@ export class EgressDeniedError extends Error {
 export function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
   return host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
-}
-
-/** Is `host` a Power Platform environment host the Studio agent may call? */
-export function isPowerPlatformEnvironmentHost(host: string): boolean {
-  return POWER_PLATFORM_ENVIRONMENT_HOST.test(host.toLowerCase());
 }
 
 /** One allowlist decision, as listeners see it. Names the host only, never the URL. */
@@ -152,15 +137,56 @@ function checkEgress(purpose: EgressPurpose, target: string | URL): URL {
   if (url.port !== "" && url.port !== "443") {
     throw new EgressDeniedError(`refusing a ${purpose} request to ${host}:${url.port}: only port 443 may leave this machine`);
   }
-  if (!ALLOWED[purpose](host)) {
+  if (host !== ALLOWED_HOSTS[purpose]) {
     throw new EgressDeniedError(`refusing a ${purpose} request to ${host}: not on the egress allowlist`);
   }
   return url;
 }
 
 /**
+ * MSAL's reports about itself, which it adds to every token request and to the sign-in
+ * address: its name and version, your OS and CPU, and how earlier requests went (its
+ * "server telemetry"). Microsoft's sign-in service does not need them to sign you in,
+ * so they never leave this machine.
+ */
+const LIBRARY_TELEMETRY: ReadonlySet<string> = new Set([
+  "x-client-sku",
+  "x-client-ver",
+  "x-client-os",
+  "x-client-cpu",
+  "x-client-xtra-sku",
+  "x-client-current-telemetry",
+  "x-client-last-telemetry",
+  "x-app-name",
+  "x-app-ver",
+]);
+
+const isLibraryTelemetry = (key: string) => LIBRARY_TELEMETRY.has(key.toLowerCase());
+
+/** `url` without MSAL's reports about itself in its query string. */
+export function withoutLibraryTelemetry(url: URL): URL {
+  const copy = new URL(url);
+  for (const key of [...copy.searchParams.keys()]) if (isLibraryTelemetry(key)) copy.searchParams.delete(key);
+  return copy;
+}
+
+/** A form-encoded body without MSAL's reports about itself. */
+function withoutLibraryTelemetryInForm(body: string): string {
+  const params = new URLSearchParams(body);
+  let changed = false;
+  for (const key of [...params.keys()]) {
+    if (isLibraryTelemetry(key)) {
+      params.delete(key);
+      changed = true;
+    }
+  }
+  return changed ? params.toString() : body;
+}
+
+/**
  * MSAL's network client, with every request checked against the `auth` allowlist and
- * redirects refused (each hop would otherwise go unchecked).
+ * redirects refused (each hop would otherwise go unchecked). MSAL's reports about
+ * itself are taken off every request first (see {@link withoutLibraryTelemetry}).
  *
  * Mirrors MSAL's own fetch-based `HttpClient` (which msal-node does not export, so it
  * cannot be wrapped): same methods, same `{ headers, body, status }` shape, JSON body,
@@ -176,7 +202,7 @@ export function createGuardedNetworkClient(doFetch: typeof globalThis.fetch = (i
   ): Promise<NetworkResponse<T>> {
     let url: URL;
     try {
-      url = assertEgress("auth", rawUrl);
+      url = withoutLibraryTelemetry(assertEgress("auth", rawUrl));
     } catch (error) {
       // MSAL re-wraps network errors as a generic `network_error`; keep the reason.
       log.warn(String(error));
@@ -185,7 +211,11 @@ export function createGuardedNetworkClient(doFetch: typeof globalThis.fetch = (i
     const controller = new AbortController();
     const timer = timeout ? setTimeout(() => controller.abort(), timeout) : undefined;
     const headers = new Headers();
-    for (const [key, value] of Object.entries(options?.headers ?? {})) headers.append(key, value);
+    for (const [key, value] of Object.entries(options?.headers ?? {})) {
+      if (!isLibraryTelemetry(key)) headers.append(key, value);
+    }
+    const formBody = /application\/x-www-form-urlencoded/i.test(headers.get("content-type") ?? "");
+    const body = method === "POST" ? (formBody ? withoutLibraryTelemetryInForm(options?.body ?? "") : (options?.body ?? "")) : undefined;
     try {
       const response = await doFetch(url, {
         method,
@@ -194,7 +224,7 @@ export function createGuardedNetworkClient(doFetch: typeof globalThis.fetch = (i
         // A redirect would send this request (a refresh token, on POST) to a host
         // the allowlist never saw. Token endpoints do not redirect; refuse.
         redirect: "error",
-        ...(method === "POST" ? { body: options?.body ?? "" } : {}),
+        ...(body !== undefined ? { body } : {}),
       });
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((value, key) => {

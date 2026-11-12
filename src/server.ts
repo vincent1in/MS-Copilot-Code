@@ -16,7 +16,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { AuthRequiredError } from "./auth.js";
 import type { ToolDef } from "./fenced.js";
 import { DEFAULT_MODEL, isLocalModel, listModelIds, resolveModel, toolRouteFor } from "./models.js";
-import { describeToolSelection, selectLeanTools } from "./config.js";
+import { LEAN_SYSTEM_PROMPT, describeToolSelection, selectLeanTools } from "./config.js";
 import { CopilotSession, DisengagedError, M365ThrottledError, M365UnavailableError, TurnRejectedError, type TurnResult } from "./session.js";
 import { createPrivateAppender } from "./private-fs.js";
 import {
@@ -68,17 +68,11 @@ export const SESSION_ID_HEADER = "x-m365-session-id";
 export interface ServerDeps {
   /** Supplies a Sydney chat token. */
   getToken: () => Promise<string>;
-  /**
-   * Resolves the declarative agent id, or null to go without one.
-   *
-   * Called lazily and only once — provisioning is slow, and only tool requests need it.
-   */
-  resolveAgent?: () => Promise<string | null>;
   /** Override the M365 origin. Tests point this at a stub. */
   endpoint?: string;
   /** Keep every tool call the model emits rather than only the first. */
   allowMultiTool?: boolean;
-  /** Offer Copilot's Bing web search plugin on agent-less turns. Off by default. */
+  /** Offer Copilot's Bing web search plugin. Off by default. */
   webSearch?: boolean;
   /**
    * What to do with a reply Copilot grounded in your work data (Work IQ): `hold` it
@@ -87,6 +81,12 @@ export interface ServerDeps {
   workIq?: WorkIqPolicy;
   /** Records every turn for the gateway monitor. Absent, nothing is recorded. */
   monitor?: Monitor;
+  /**
+   * The settings in force, read once per request, so a change on the app's Settings
+   * page applies from the next message. When given, it overrides `lean`,
+   * `leanSystemPrompt`, `webSearch` and `workIq` above.
+   */
+  settings?: () => LiveSettings;
   /**
    * Trim the harness's toolset before the model sees it.
    *
@@ -126,6 +126,41 @@ export interface ServerDeps {
   allowedOrigins?: readonly string[];
   /** Largest request body accepted, in bytes. */
   maxBodyBytes?: number;
+}
+
+/** The settings a request reads. A subset of `GatewaySettings` (see settings.ts). */
+export interface LiveSettings {
+  workIq: WorkIqPolicy;
+  webSearch: boolean;
+  lean: boolean;
+  leanSystemPrompt: boolean;
+}
+
+/** What one request runs with: the live settings when given, else the fixed deps. */
+interface RequestSettings {
+  workIq: WorkIqPolicy;
+  webSearch: boolean;
+  lean: boolean;
+  /** The replacement system prompt, when one is in force. */
+  leanSystemPrompt?: string;
+}
+
+function requestSettings(deps: ServerDeps): RequestSettings {
+  const live = deps.settings?.();
+  if (live) {
+    return {
+      workIq: live.workIq,
+      webSearch: live.webSearch,
+      lean: live.lean,
+      ...(live.leanSystemPrompt ? { leanSystemPrompt: LEAN_SYSTEM_PROMPT } : {}),
+    };
+  }
+  return {
+    workIq: deps.workIq ?? DEFAULT_WORK_IQ_POLICY,
+    webSearch: deps.webSearch === true,
+    lean: deps.lean !== false,
+    ...(deps.leanSystemPrompt !== undefined ? { leanSystemPrompt: deps.leanSystemPrompt } : {}),
+  };
 }
 
 export interface ProxyHandle {
@@ -169,33 +204,9 @@ export async function startServer(deps: ServerDeps): Promise<ProxyHandle> {
   }
   const maxBodyBytes = deps.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 
-  // Resolved once, then reused: provisioning an agent is slow and only the first
-  // tool request should pay for it. A failure is cached only when it is permanent
-  // (401/403: the account has no Copilot Studio access); anything else — a network
-  // blip, a 5xx, not signed in yet — is retried on the next tool request.
-  let agentPromise: Promise<string | null> | undefined;
-  const agentId = async (): Promise<string | null> => {
-    if (!deps.resolveAgent) return null;
-    agentPromise ??= deps.resolveAgent().catch((error) => {
-      // Without Copilot Studio access we still work, just less reliably: the model
-      // gets the fenced contract per-request instead of server-side.
-      const status = (error as { status?: unknown } | null)?.status;
-      const permanent = status === 401 || status === 403;
-      log.warn(
-        permanent
-          ? "no Copilot Studio access; continuing without a declarative agent"
-          : "could not resolve a declarative agent; continuing without one and retrying next time",
-        String(error),
-      );
-      if (!permanent) agentPromise = undefined;
-      return null;
-    });
-    return agentPromise;
-  };
-
   const portOf = () => (server.address() as AddressInfo).port;
   const server = createServer((request, response) => {
-    handle(request, response, { deps, pool, agentId, apiKey, maxBodyBytes, port: portOf() }).catch((error) => {
+    handle(request, response, { deps, pool, apiKey, maxBodyBytes, port: portOf() }).catch((error) => {
       log.error("unhandled request failure", String(error));
       sendError(response, 500, "internal_error", String(error));
     });
@@ -232,7 +243,6 @@ export async function startServer(deps: ServerDeps): Promise<ProxyHandle> {
 interface Context {
   deps: ServerDeps;
   pool: ConversationPool;
-  agentId: () => Promise<string | null>;
   apiKey: string;
   maxBodyBytes: number;
   port: number;
@@ -347,8 +357,9 @@ async function handleChatCompletion(
   }
 
   const model = resolveModel(body.model);
+  const settings = requestSettings(context.deps);
   const requested = (body.tools ?? []) as ToolDef[];
-  const tools = context.deps.lean === false ? requested : selectLeanTools(requested);
+  const tools = settings.lean ? selectLeanTools(requested) : requested;
   if (tools.length !== requested.length) {
     log.info(`trimmed toolset ${requested.length} -> ${tools.length}`, tools.map((t) => t.function.name).join(","));
     // Reached only when the trim actually removed something, which cannot happen
@@ -387,7 +398,7 @@ async function handleChatCompletion(
     // Everything this turn does — token refresh, uploads, the chat socket — runs in
     // its scope, so the monitor can tie each outbound connection to the turn.
     await turnScope.run(recorder.id, () =>
-      runTurn(request, response, context, body, conversation, model, tools, offered, sessionId, recorder),
+      runTurn(request, response, context, settings, body, conversation, model, tools, offered, sessionId, recorder),
     );
   } finally {
     release();
@@ -398,7 +409,6 @@ export interface TurnLogEntry {
   time: string;
   model: string;
   tone: string | null;
-  agent: boolean;
   /** How the tool block was worded, on a tool turn. */
   framing?: "default" | "relay";
   tools: string[];
@@ -430,6 +440,7 @@ async function runTurn(
   request: IncomingMessage,
   response: ServerResponse,
   context: Context,
+  settings: RequestSettings,
   body: ChatRequest,
   conversation: Conversation,
   model: ReturnType<typeof resolveModel>,
@@ -449,7 +460,7 @@ async function runTurn(
   // Every tools-derived decision below reads `effectiveTools`. (Upstream emptied it
   // for mailbox-grounded models, which this fork removes.)
   const effectiveTools = tools;
-  const workIq = context.deps.workIq ?? DEFAULT_WORK_IQ_POLICY;
+  const workIq = settings.workIq;
 
   // Only the messages this turn carries: M365 already has any earlier image.
   const images = collectImages(body.messages, conversation.sentMessageCount);
@@ -459,15 +470,11 @@ async function runTurn(
   const prompt = buildTurnPrompt(body.messages, effectiveTools, conversation.sentMessageCount, {
     framing: route.framing,
     ...(route.sandbox ? { sandbox: route.sandbox } : {}),
-    ...(context.deps.leanSystemPrompt !== undefined ? { leanSystemPrompt: context.deps.leanSystemPrompt } : {}),
+    ...(settings.leanSystemPrompt !== undefined ? { leanSystemPrompt: settings.leanSystemPrompt } : {}),
     ...(note ? { note } : {}),
   });
 
   if (recorder.watching) recordRequest(recorder, body, conversation, model, effectiveTools, offered, sessionId, images.length, prompt);
-
-  // The agent overrides the tone and forces GPT, so attach it only when the turn
-  // actually needs tool instructions. Plain chat then reaches the tone's real model.
-  const agent = effectiveTools.length > 0 && route.agent ? await context.agentId() : null;
 
   const abort = new AbortController();
   request.on("close", () => {
@@ -490,7 +497,6 @@ async function runTurn(
       time: new Date().toISOString(),
       model: model.id,
       tone: model.tone,
-      agent: Boolean(agent),
       ...(effectiveTools.length > 0 ? { framing: route.framing } : {}),
       tools: effectiveTools.map((tool) => tool.function.name),
       ...fields,
@@ -498,8 +504,7 @@ async function runTurn(
 
   const turnOptions = {
     ...(model.tone ? { tone: model.tone } : {}),
-    agentId: agent,
-    ...(context.deps.webSearch ? { webSearch: true } : {}),
+    ...(settings.webSearch ? { webSearch: true } : {}),
     signal: abort.signal,
   };
   const recordTurn = (result: TurnResult, extra: Partial<TurnLogEntry> = {}) =>
@@ -552,7 +557,7 @@ async function runTurn(
     // Work IQ: did Copilot search or cite anything to write this? Checked before the
     // reply goes anywhere, so a held reply never reaches opencode.
     const grounding = recorder.grounding();
-    const judgement = judgeGrounding(grounding, workIq, context.deps.webSearch === true);
+    const judgement = judgeGrounding(grounding, workIq, settings.webSearch);
     if (judgement) {
       const summary = describeGrounding(grounding);
       recorder.check("work-data", judgement.verdict, summary, grounding.signals);
@@ -633,7 +638,7 @@ function recordRequest(
     recorder.check(
       "tools",
       "info",
-      `opencode offered ${offered.length} tools and the gateway passed on ${kept.length}, because Copilot stops engaging when it is offered a dozen or so. Left out: ${dropped.join(", ")}.`,
+      `OpenCode offered ${offered.length} tools and the gateway passed on ${kept.length}, because Copilot stops engaging when it is offered a dozen or so. Left out: ${dropped.join(", ")}.`,
     );
   }
   if (conversation.session?.turnIndex === 0) {

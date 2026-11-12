@@ -1,5 +1,6 @@
 /**
- * The monitor page's listener: a second loopback server, separate from the proxy.
+ * The page's listener (the gateway app's UI): a second loopback server, separate from
+ * the proxy.
  *
  * The proxy refuses every browser outright; this one exists to be opened in a browser,
  * so it gets its own port (and therefore its own origin) and the proxy's rules stay
@@ -17,20 +18,26 @@
  * - Responses forbid framing, sniffing, caching and referrers, and the page's content
  *   security policy allows only its own script and style: model output is rendered as
  *   text, and could not run even if it were not.
- * - It is read-only, apart from "clear".
+ * - Changes go through a short list of JSON endpoints (save a setting, sign in, send a
+ *   test message, clear the log), each something the user clicked,
+ *   each with the same key and origin checks, and each validating its input.
  */
 
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { SettingLockedError, SettingValueError } from "../settings.js";
+import type { AppController } from "./app.js";
 import type { GatewayFacts, MonitorEvent } from "./events.js";
 import { MONITOR_LIMITS, type Monitor } from "./monitor.js";
 
 export interface MonitorServerOptions {
   monitor: Monitor;
-  /** The gateway's settings, for the page's header. */
+  /** Which gateway this is, for the page's header. */
   facts?: GatewayFacts;
+  /** The Set up and Settings backend. Without it the page shows Traffic and Checks only. */
+  app?: AppController;
   /** Loopback only: `127.0.0.1` (the default), `::1` or `localhost`. */
   host?: string;
   port?: number;
@@ -75,6 +82,12 @@ const ASSETS: Record<string, { file: string; type: string }> = {
 /** A slow page past this much unsent data is dropped rather than buffered without end. */
 const MAX_BACKLOG_BYTES = 64 * 1024 * 1024;
 
+/** The largest JSON body an endpoint reads. Every one of them takes a few short fields. */
+const MAX_JSON_BYTES = 16 * 1024;
+
+const TEXT = "text/plain; charset=utf-8";
+const JSON_TYPE = "application/json; charset=utf-8";
+
 export async function startMonitorServer(options: MonitorServerOptions): Promise<MonitorServerHandle> {
   const host = options.host ?? "127.0.0.1";
   if (!LOOPBACK_NAMES.has(host)) {
@@ -85,51 +98,86 @@ export async function startMonitorServer(options: MonitorServerOptions): Promise
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const assets = loadAssets(options.assetsDir ?? new URL("./ui/", import.meta.url));
   const clients = new Set<ServerResponse>();
-  const { monitor } = options;
-
-  const server = createServer((request, response) => {
-    try {
-      route(request, response);
-    } catch (error) {
-      send(response, 500, "text/plain; charset=utf-8", `The monitor failed: ${String(error)}`);
-    }
+  const { monitor, app } = options;
+  // Tell open pages to re-read the app state; the state itself is fetched with the key.
+  const stopAppFeed = app?.onChange(() => {
+    for (const client of clients) if (!client.writableEnded) client.write(`data: ${JSON.stringify({ kind: "app-changed" })}\n\n`);
   });
 
-  const route = (request: IncomingMessage, response: ServerResponse) => {
+  const server = createServer((request, response) => {
+    route(request, response).catch((error: unknown) => {
+      send(response, 500, TEXT, `The gateway page failed: ${String((error as Error)?.message ?? error)}`);
+    });
+  });
+
+  const route = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const port = (server.address() as AddressInfo).port;
     const method = (request.method ?? "GET").toUpperCase();
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
 
-    if (!isOwnHost(request.headers.host, port)) return send(response, 403, "text/plain; charset=utf-8", "Host must be this machine's loopback address.");
-    if (method === "OPTIONS") return send(response, 403, "text/plain; charset=utf-8", "Cross-origin requests are not supported.");
-    if (!isSameOrigin(request)) return send(response, 403, "text/plain; charset=utf-8", "Only the monitor page itself may call this.");
+    if (!isOwnHost(request.headers.host, port)) return send(response, 403, TEXT, "Host must be this machine's loopback address.");
+    if (method === "OPTIONS") return send(response, 403, TEXT, "Cross-origin requests are not supported.");
+    if (!isSameOrigin(request)) return send(response, 403, TEXT, "Only the monitor page itself may call this.");
 
     const asset = ASSETS[path];
     if (asset) {
-      if (method !== "GET" && method !== "HEAD") return send(response, 405, "text/plain; charset=utf-8", "Use GET.");
+      if (method !== "GET" && method !== "HEAD") return send(response, 405, TEXT, "Use GET.");
       return send(response, 200, asset.type, method === "HEAD" ? "" : assets[asset.file]!);
     }
-    if (path === "/favicon.ico") return send(response, 204, "text/plain; charset=utf-8", "");
+    if (path === "/favicon.ico") return send(response, 204, TEXT, "");
 
-    if (path === "/events" || path === "/clear") {
+    if (path === "/events" || path === "/clear" || path.startsWith("/api/")) {
       if (!hasToken(request.headers.authorization, token)) {
-        return send(response, 401, "text/plain; charset=utf-8", "Open the monitor from the link `opencode-m365 monitor` prints; this one is missing its key.");
+        return send(response, 401, TEXT, "Open this page from the link `opencode-m365 open` (or `monitor`) gives; this one is missing its key.");
       }
       if (path === "/events") {
-        if (method !== "GET") return send(response, 405, "text/plain; charset=utf-8", "Use GET.");
+        if (method !== "GET") return send(response, 405, TEXT, "Use GET.");
         return stream(request, response);
       }
-      if (method !== "POST") return send(response, 405, "text/plain; charset=utf-8", "Use POST.");
-      monitor.clear();
-      return send(response, 204, "text/plain; charset=utf-8", "");
+      if (path === "/clear") {
+        if (method !== "POST") return send(response, 405, TEXT, "Use POST.");
+        monitor.clear();
+        return send(response, 204, TEXT, "");
+      }
+      return api(request, response, method, path);
     }
 
-    send(response, 404, "text/plain; charset=utf-8", "Not found.");
+    send(response, 404, TEXT, "Not found.");
+  };
+
+  /** The Set up and Settings endpoints. */
+  const api = async (request: IncomingMessage, response: ServerResponse, method: string, path: string): Promise<void> => {
+    if (!app) return send(response, 404, TEXT, "This gateway has no setup page.");
+    if (path === "/api/state") {
+      if (method !== "GET") return send(response, 405, TEXT, "Use GET.");
+      return json(response, 200, await app.state());
+    }
+    if (method !== "POST") return send(response, 405, TEXT, "Use POST.");
+    const body = await readJson(request);
+    if (body === undefined) return json(response, 400, { error: "Send a small JSON object with Content-Type: application/json." });
+    try {
+      switch (path) {
+        case "/api/settings":
+          if (typeof body.key !== "string" || !("value" in body)) return json(response, 400, { error: "Send { key, value }." });
+          return json(response, 200, await app.setSetting(body.key, body.value));
+        case "/api/sign-in":
+          return json(response, 202, await app.signIn());
+        case "/api/test":
+          if (typeof body.model !== "string") return json(response, 400, { error: "Send { model }." });
+          return json(response, 200, await app.sendTest(body.model));
+        default:
+          return json(response, 404, { error: "Not found." });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof SettingValueError) return json(response, 400, { error: message });
+      return json(response, error instanceof SettingLockedError ? 409 : 422, { error: message });
+    }
   };
 
   const stream = (request: IncomingMessage, response: ServerResponse) => {
     if (clients.size >= maxClients) {
-      return send(response, 429, "text/plain; charset=utf-8", `The monitor is already open in ${maxClients} places. Close one and reload.`);
+      return send(response, 429, TEXT, `The monitor is already open in ${maxClients} places. Close one and reload.`);
     }
     response.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/event-stream; charset=utf-8", Connection: "keep-alive" });
     clients.add(response);
@@ -155,7 +203,13 @@ export async function startMonitorServer(options: MonitorServerOptions): Promise
     };
     request.on("close", drop);
 
-    write({ kind: "hello", limits: MONITOR_LIMITS, at: new Date().toISOString(), ...(options.facts ? { facts: options.facts } : {}) });
+    write({
+      kind: "hello",
+      limits: MONITOR_LIMITS,
+      at: new Date().toISOString(),
+      setup: Boolean(app),
+      ...(options.facts ? { facts: options.facts } : {}),
+    });
     for (const event of monitor.snapshot()) write(event);
     write({ kind: "live" });
   };
@@ -173,6 +227,7 @@ export async function startMonitorServer(options: MonitorServerOptions): Promise
     port,
     close: () =>
       new Promise<void>((resolve) => {
+        stopAppFeed?.();
         for (const client of clients) if (!client.writableEnded) client.end();
         clients.clear();
         server.closeAllConnections?.();
@@ -191,6 +246,30 @@ function loadAssets(dir: URL): Record<string, string> {
     }
   }
   return out;
+}
+
+function json(response: ServerResponse, status: number, value: unknown): void {
+  send(response, status, JSON_TYPE, JSON.stringify(value));
+}
+
+/** A small JSON object from the request, or undefined for anything else. */
+async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | undefined> {
+  if (!/^application\/json\b/i.test(request.headers["content-type"] ?? "")) return undefined;
+  const declared = Number(request.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) return undefined;
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_JSON_BYTES) return undefined;
+    chunks.push(chunk as Buffer);
+  }
+  try {
+    const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function send(response: ServerResponse, status: number, type: string, body: string): void {

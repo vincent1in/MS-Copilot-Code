@@ -1,17 +1,13 @@
 import { createServer, type Server } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { uploadImage } from "./image.js";
-import { assertEgress, createGuardedNetworkClient, EgressDeniedError, isPowerPlatformEnvironmentHost } from "./egress.js";
-
-const PP_HOST = "defaultabcdef0123456789abcdef01234567.89.environment.api.powerplatform.com";
+import { ALLOWED_HOSTS, assertEgress, createGuardedNetworkClient, EgressDeniedError, type EgressPurpose } from "./egress.js";
 
 describe("assertEgress", () => {
   it.each([
     ["auth", "https://login.microsoftonline.com/common/oauth2/v2.0/token"],
     ["chat", "wss://substrate.office.com/m365Copilot/Chathub/oid@tid?access_token=x"],
     ["chat", "https://substrate.office.com/m365Copilot/UploadFile"],
-    ["studio", "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/environments/~default?api-version=2023-06-01"],
-    ["studio", `https://${PP_HOST}/copilotstudio/minimalBots/api?api-version=2022-03-01-preview`],
   ] as const)("allows %s → %s", (purpose, url) => {
     expect(assertEgress(purpose, url).hostname).toBe(new URL(url).hostname);
   });
@@ -19,15 +15,15 @@ describe("assertEgress", () => {
   it.each([
     ["chat", "https://login.microsoftonline.com/common", "a chat request to the auth host"],
     ["auth", "https://substrate.office.com/x", "an auth request to the chat host"],
-    ["chat", "https://api.bap.microsoft.com/x", "a chat request to Power Platform"],
+    ["chat", "https://api.bap.microsoft.com/x", "Power Platform (Copilot Studio is removed)"],
+    ["auth", "https://defaultabc.89.environment.api.powerplatform.com/x", "a Power Platform environment"],
     ["chat", "wss://substrate.office.com.evil.example/x", "a look-alike suffix"],
     ["chat", "wss://evil.example/x?substrate.office.com", "the host in the query"],
     ["chat", "ws://substrate.office.com/x", "plaintext ws to a remote host"],
     ["auth", "http://login.microsoftonline.com/x", "plaintext http to a remote host"],
     ["chat", "wss://substrate.office.com:8443/x", "a non-443 port"],
     ["chat", "wss://user:pass@substrate.office.com/x", "credentials in the URL"],
-    ["studio", "https://evil.example/copilotstudio", "an arbitrary host"],
-    ["studio", "https://a.b.c.environment.api.powerplatform.com/x", "the wrong label shape"],
+    ["chat", "https://evil.example/copilotstudio", "an arbitrary host"],
     ["auth", "file:///etc/passwd", "a non-network scheme"],
     ["auth", "not a url", "garbage"],
   ] as const)("refuses %s → %s (%s)", (purpose, url, _why) => {
@@ -37,7 +33,12 @@ describe("assertEgress", () => {
   it("allows loopback for any purpose, which is where the test stub lives", () => {
     expect(assertEgress("chat", "ws://127.0.0.1:4567/m365Copilot/Chathub/x").port).toBe("4567");
     expect(assertEgress("auth", "http://localhost:1/").hostname).toBe("localhost");
-    expect(assertEgress("studio", "http://[::1]:2/").hostname).toBe("[::1]");
+    expect(assertEgress("chat", "http://[::1]:2/").hostname).toBe("[::1]");
+  });
+
+  it("knows exactly two hosts, and nothing for a purpose it does not know", () => {
+    expect(ALLOWED_HOSTS).toEqual({ auth: "login.microsoftonline.com", chat: "substrate.office.com" });
+    expect(() => assertEgress("studio" as EgressPurpose, "https://api.bap.microsoft.com/x")).toThrow(EgressDeniedError);
   });
 
   it("never echoes the URL's query string, which can hold the access token", () => {
@@ -48,14 +49,6 @@ describe("assertEgress", () => {
       expect(String(error)).not.toContain("SECRET-TOKEN");
       expect(String(error)).toContain("evil.example");
     }
-  });
-});
-
-describe("isPowerPlatformEnvironmentHost", () => {
-  it("accepts the environment host shape and nothing else", () => {
-    expect(isPowerPlatformEnvironmentHost(PP_HOST)).toBe(true);
-    expect(isPowerPlatformEnvironmentHost(`${PP_HOST}.evil.example`)).toBe(false);
-    expect(isPowerPlatformEnvironmentHost("environment.api.powerplatform.com")).toBe(false);
   });
 });
 
@@ -180,5 +173,49 @@ describe("onEgress", () => {
     expect(() => assertEgress("chat", "not a url access_token=SECRET")).toThrow(EgressDeniedError);
     stop();
     expect(heard[0]!.host).toBe("(not a valid URL)");
+  });
+});
+
+describe("MSAL's reports about itself", () => {
+  it("are taken off token requests before they leave: body, query and headers", async () => {
+    const doFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const client = createGuardedNetworkClient(doFetch as unknown as typeof fetch);
+    const body = [
+      "client_id=c0ab8ce9",
+      "scope=https%3A%2F%2Fsubstrate.office.com%2Fsydney%2Fsydney.readwrite%20offline_access",
+      "grant_type=refresh_token",
+      "refresh_token=0.AAAA-rt_value",
+      "x-client-SKU=msal.js.node",
+      "x-client-VER=7.2.1",
+      "x-client-OS=linux",
+      "x-client-CPU=x64",
+      "x-client-current-telemetry=5%7C61%2C0%2C%2C%2C%7C%2C",
+      "x-client-last-telemetry=5%7C0%7C%7C%7C0%2C0",
+      "x-ms-lib-capability=retry-after%2C%20h429",
+    ].join("&");
+    await client.sendPostRequestAsync("https://login.microsoftonline.com/common/oauth2/v2.0/token?client-request-id=abc&x-client-SKU=msal.js.node", {
+      body,
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8", "x-client-current-telemetry": "5|61" },
+    });
+    const [url, init] = doFetch.mock.calls[0] as unknown as [URL, RequestInit];
+    const sent = new URLSearchParams(String(init.body));
+    expect([...sent.keys()]).toEqual(["client_id", "scope", "grant_type", "refresh_token", "x-ms-lib-capability"]);
+    expect(sent.get("scope")).toBe("https://substrate.office.com/sydney/sydney.readwrite offline_access");
+    expect(sent.get("refresh_token")).toBe("0.AAAA-rt_value");
+    expect(String(url)).toBe("https://login.microsoftonline.com/common/oauth2/v2.0/token?client-request-id=abc");
+    expect((init.headers as Headers).has("x-client-current-telemetry")).toBe(false);
+  });
+
+  it("leaves a body without them exactly as it was", async () => {
+    const doFetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    const client = createGuardedNetworkClient(doFetch as unknown as typeof fetch);
+    await client.sendPostRequestAsync("https://login.microsoftonline.com/x", { body: "a=1&b=%2B", headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+    expect((doFetch.mock.calls[0] as unknown as [URL, RequestInit])[1].body).toBe("a=1&b=%2B");
+  });
+
+  it("are taken off the sign-in address too", async () => {
+    const { withoutLibraryTelemetry } = await import("./egress.js");
+    const url = new URL("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=x&x-client-SKU=msal.js.node&x-client-VER=7&code_challenge=c&x-client-OS=darwin");
+    expect(withoutLibraryTelemetry(url).toString()).toBe("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=x&code_challenge=c");
   });
 });

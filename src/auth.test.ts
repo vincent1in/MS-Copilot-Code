@@ -4,8 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   AuthRequiredError,
-  BAP_SCOPE,
-  POWERPLATFORM_SCOPE,
   SYDNEY_SCOPES,
   authCodeFromUrl,
   createCachePlugin,
@@ -30,10 +28,8 @@ describe("scopes", () => {
     expect(SYDNEY_SCOPES).toContain("https://substrate.office.com/sydney/sydney.readwrite");
   });
 
-  it("keeps agent-management scopes separate — they need their own acquisition", () => {
-    expect(POWERPLATFORM_SCOPE).toBe("https://api.powerplatform.com/.default");
-    expect(BAP_SCOPE).toBe("https://api.bap.microsoft.com/.default");
-    expect(SYDNEY_SCOPES).not.toContain(POWERPLATFORM_SCOPE);
+  it("asks for nothing beyond Copilot chat (no Power Platform, no Copilot Studio)", () => {
+    expect(SYDNEY_SCOPES.every((scope) => scope.startsWith("https://substrate.office.com/sydney/"))).toBe(true);
   });
 });
 
@@ -93,10 +89,11 @@ describe("acquiring a token", () => {
     expect(app.acquireTokenSilent).toHaveBeenCalledWith(expect.objectContaining({ scopes: SYDNEY_SCOPES }));
   });
 
-  it("acquires other scopes separately", async () => {
+  it("names the signed-in account from the cache alone, without refreshing anything", async () => {
     const app = fakeApp();
-    await createTokenClient({ app: app as any }).getTokenForScope([POWERPLATFORM_SCOPE]);
-    expect(app.acquireTokenSilent).toHaveBeenCalledWith(expect.objectContaining({ scopes: [POWERPLATFORM_SCOPE] }));
+    expect(await createTokenClient({ app: app as any }).account()).toBe("you@example.com");
+    expect(app.acquireTokenSilent).not.toHaveBeenCalled();
+    expect(await createTokenClient({ app: fakeApp({ accounts: [] }) as any }).account()).toBeUndefined();
   });
 
   it("asks for a sign-in when the cache holds no account", async () => {

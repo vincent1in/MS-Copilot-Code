@@ -153,22 +153,16 @@ describe("routing", () => {
   });
 });
 
-describe("agent attachment", () => {
-  it("references the declarative agent when one is supplied", async () => {
+describe("plugins and agents", () => {
+  it("never attaches a Copilot Studio agent (removed from this fork)", async () => {
     stub = await startStubCopilot();
-    await sessionFor(stub).run("hi", { agentId: "T_123.abc.gpt.default" });
+    await sessionFor(stub).run("hi");
     const message = chatFrame(stub).arguments[0];
-    expect(message.threadLevelGptId).toEqual({ id: "T_123.abc.gpt.default", source: "MOS3" });
-    expect(message.gpts[0].id).toBe("T_123.abc.gpt.default");
+    expect(message.threadLevelGptId).toBeUndefined();
+    expect(message.gpts).toBeUndefined();
   });
 
-  it("does not send the built-in plugins alongside an agent", async () => {
-    stub = await startStubCopilot();
-    await sessionFor(stub).run("hi", { agentId: "T_123.abc.gpt.default" });
-    expect(chatFrame(stub).arguments[0].plugins).toBeUndefined();
-  });
-
-  it("does not offer Bing web search by default, even without an agent", async () => {
+  it("does not offer Bing web search by default", async () => {
     // Upstream sent BingWebSearch on every agent-less turn; on a coding turn that lets
     // Copilot turn parts of your code into Bing queries.
     stub = await startStubCopilot();
@@ -182,11 +176,6 @@ describe("agent attachment", () => {
     expect(chatFrame(stub).arguments[0].plugins).toEqual([{ Id: "BingWebSearch", Source: "BuiltIn" }]);
   });
 
-  it("never offers Bing alongside an agent, opt-in or not", async () => {
-    stub = await startStubCopilot();
-    await sessionFor(stub).run("hi", { agentId: "T_123.abc.gpt.default", webSearch: true });
-    expect(chatFrame(stub).arguments[0].plugins).toBeUndefined();
-  });
 });
 
 describe("no mailbox grounding (removed in this fork)", () => {
@@ -243,12 +232,6 @@ describe("images", () => {
     await sessionFor(stub).run("hi");
     expect(chatFrame(stub).arguments[0].message.messageAnnotations).toBeUndefined();
     expect(stub.uploads).toHaveLength(0);
-  });
-
-  it("works with the agent attached, which the upload does not depend on", async () => {
-    stub = await startStubCopilot();
-    await sessionFor(stub).run("look", { images: [PNG], agentId: "T_1.a.gpt.default" });
-    expect(chatFrame(stub).arguments[0].message.messageAnnotations).toHaveLength(1);
   });
 
   it("tells the model an image did not arrive, so it does not describe one it never saw", async () => {

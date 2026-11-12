@@ -9,7 +9,6 @@
 import { isLoopbackHostname } from "./egress.js";
 import { MODELS, isLocalModel } from "./models.js";
 import { findShellTool, type ToolDef } from "./fenced.js";
-import { WORK_IQ_POLICIES, type WorkIqPolicy } from "./workiq.js";
 
 /** The provider id opencode addresses models by: `m365/<model>`. */
 export const PROVIDER_ID = "m365";
@@ -113,61 +112,13 @@ export function describeToolSelection(requested: readonly ToolDef[]): string | u
   return undefined;
 }
 
+/**
+ * The plugin's connection options. Everything else the plugin's options can say
+ * (`workIq`, `webSearch`, `lean`, …) is a setting: `settings.ts` reads those from the
+ * raw options, so the app's Settings page can show them as set in OpenCode's config.
+ */
 export interface PluginOptions {
-  /** Trim opencode's toolset and system prompt to something M365 will engage with. */
-  lean: boolean;
-  /** Set `model` when the user has not chosen one. */
-  setDefaultModel: boolean;
-  /**
-   * Keep session-title generation off M365.
-   *
-   * opencode 2 has no `small_model` setting, so the plugin flags the title request
-   * and the proxy answers it locally. The name is kept from when it pointed opencode
-   * 1's `small_model` at the local titler, so existing configs keep working.
-   */
-  setSmallModel: boolean;
-  /**
-   * Replace the harness's prose system prompt with a lean one.
-   *
-   * Off by default, and deliberately NOT implied by `lean`. Trimming the toolset is
-   * a measured necessity; replacing the prose is an unverified bet borrowed from
-   * another harness's measurements, and it costs the user's own AGENTS.md rules if
-   * the preservation logic is ever wrong.
-   */
-  leanSystemPrompt: boolean;
-  /**
-   * Provision a Copilot Studio declarative agent and attach it to tool turns.
-   *
-   * OFF by default in this fork. When on, the first tool turn creates and publishes a
-   * bot named `m365-tool-agent-<hash>` in the tenant's default Power Platform
-   * environment (never deleted), which needs Copilot Studio access and Power Platform
-   * / BAP tokens. Off, nothing is created in the tenant and those scopes are never
-   * requested; tool turns run agent-less on the per-request fenced prompt.
-   * `M365_STUDIO_AGENT=1` turns it on for the CLI and the plugin alike.
-   */
-  studioAgent: boolean;
-  /**
-   * Let Copilot use its built-in Bing web search on coding turns. OFF by default in
-   * this fork: with it on, Copilot may send parts of your prompt — including code —
-   * to Bing as search queries. `M365_WEB_SEARCH=1` turns it on for the CLI and the
-   * plugin alike.
-   */
-  webSearch: boolean;
-  /**
-   * Run the gateway monitor: a page on this machine showing what each turn sent to
-   * Copilot, what came back, and what the gateway checked. OFF by default. Kept in
-   * memory only; `opencode-m365 monitor` prints its link. `M365_MONITOR=1` turns it on
-   * for the CLI and the plugin alike.
-   */
-  monitor: boolean;
-  /**
-   * What to do with a reply Copilot drew from your work data (Work IQ: email, files,
-   * chats, meetings): "hold" it (the default — opencode gets an error, not the reply),
-   * "flag" it in the monitor, or "allow" it. `M365_WORK_IQ` sets it for the CLI too.
-   * Unset here means the environment, then "hold".
-   */
-  workIq?: WorkIqPolicy;
-  /** Use an already-running proxy instead of starting one in-process. */
+  /** Use an already-running proxy on this machine instead of starting one in-process. */
   baseUrl?: string;
   /**
    * The secret that external proxy demands (`opencode-m365 serve` prints it, or takes
@@ -191,24 +142,6 @@ export function loopbackBaseUrl(raw: unknown): string | undefined {
   return isLoopbackHostname(url.hostname) ? raw : undefined;
 }
 
-/**
- * Is the opt-in Copilot Studio agent enabled? The plugin option, or
- * `M365_STUDIO_AGENT=1` (the only switch for `opencode-m365 serve`).
- */
-export function studioAgentEnabled(options?: Pick<PluginOptions, "studioAgent">): boolean {
-  return options?.studioAgent === true || process.env.M365_STUDIO_AGENT === "1";
-}
-
-/** Is Bing web search allowed on coding turns? The plugin option, or `M365_WEB_SEARCH=1`. */
-export function webSearchEnabled(options?: Pick<PluginOptions, "webSearch">): boolean {
-  return options?.webSearch === true || process.env.M365_WEB_SEARCH === "1";
-}
-
-/** Is the gateway monitor on? The plugin option, or `M365_MONITOR=1`. */
-export function monitorEnabled(options?: Pick<PluginOptions, "monitor">): boolean {
-  return options?.monitor === true || process.env.M365_MONITOR === "1";
-}
-
 /** Where the proxy is, and the bearer secret it requires. */
 export interface ProxyEndpoint {
   baseUrl: string;
@@ -216,32 +149,44 @@ export interface ProxyEndpoint {
 }
 
 /**
- * Normalise the options object opencode hands us.
+ * Normalise the connection options opencode hands us.
  *
  * These come straight out of user-authored JSON, so anything can be anything. A bad
  * value falls back to the default rather than throwing — a plugin that throws during
  * load takes opencode's whole config with it.
  */
-export function resolveOptions(raw: Partial<PluginOptions> | undefined): PluginOptions {
-  const bool = (value: unknown, fallback: boolean) => (typeof value === "boolean" ? value : fallback);
+export function resolveOptions(raw: Record<string, unknown> | undefined): PluginOptions {
   const options = raw ?? {};
   return {
-    lean: bool(options.lean, true),
-    setDefaultModel: bool(options.setDefaultModel, true),
-    setSmallModel: bool(options.setSmallModel, true),
-    leanSystemPrompt: bool(options.leanSystemPrompt, false),
-    studioAgent: bool(options.studioAgent, false),
-    webSearch: bool(options.webSearch, false),
-    monitor: bool(options.monitor, false),
-    ...(typeof options.workIq === "string" && (WORK_IQ_POLICIES as readonly string[]).includes(options.workIq)
-      ? { workIq: options.workIq }
-      : {}),
     // opencode sends every prompt and the proxy key to `baseUrl`, so only a proxy on
     // this machine is accepted; anything else falls back to the in-process proxy.
     baseUrl: loopbackBaseUrl(options.baseUrl),
     apiKey: typeof options.apiKey === "string" && options.apiKey !== "" ? options.apiKey : undefined,
   };
 }
+
+/**
+ * The system prompt used for M365 models when the `leanSystemPrompt` setting is on.
+ *
+ * opencode's own prompt is long and carefully worded for frontier models. Measured
+ * against M365, a shorter and blunter prompt produced markedly better tool
+ * compliance — the same model confabulates ("I can't access the files, paste them")
+ * under a longer, more polished assistant prompt.
+ *
+ * This is applied in the **proxy**, not through opencode's own hook. Verified against
+ * opencode 1.18.18: `experimental.chat.system.transform` fires and accepts a
+ * replacement `system` array, but the request that reaches the provider still carries
+ * the original prompt. Since our provider only ever serves our own models, doing it
+ * proxy-side is also correctly scoped — no other provider is affected.
+ */
+export const LEAN_SYSTEM_PROMPT = [
+  "You are a coding agent working in the user's real workspace on this machine.",
+  "The files and commands are real, and anything you run actually runs.",
+  "",
+  "Work one step at a time: take an action, read the result, then decide the next step.",
+  "Inspect before you change something, and check your change afterwards.",
+  "Report what you actually did, not what you intended to do.",
+].join("\n");
 
 /**
  * opencode 2's `Provider.Info`, with its branded id types written as plain strings.
@@ -362,14 +307,19 @@ export const PACKAGE_NAME = "@vincent1in/opencode-m365-copilot";
 export const UPSTREAM_PACKAGE_NAME = "opencode-m365-copilot";
 const KNOWN_PACKAGE_NAMES: readonly string[] = [PACKAGE_NAME, UPSTREAM_PACKAGE_NAME];
 
-/** Every option key this plugin reads; anything else belongs to another plugin. */
-const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<keyof PluginOptions>([
+/**
+ * Every option key this plugin reads, or once read (`studioAgent`, removed with Copilot
+ * Studio support); anything else belongs to another plugin.
+ */
+const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<string>([
   "lean",
   "setDefaultModel",
   "setSmallModel",
   "leanSystemPrompt",
   "studioAgent",
   "webSearch",
+  "workIq",
+  "monitor",
   "baseUrl",
   "apiKey",
 ]);
@@ -401,8 +351,9 @@ export function mergeOpencodeConfig(
     inspect?: (path: string) => PluginPathInfo;
   },
 ): Record<string, any> {
+  // No `$schema` link is added: editors download the schema from opencode.ai when they
+  // open a file that names one. One the user already has stays.
   const merged: Record<string, any> = { ...existing };
-  merged.$schema ??= "https://opencode.ai/config.json";
   const pluginDir = opts.pluginDir ?? opts.pluginRef;
 
   const inspect = opts.inspect ?? (() => ({ exists: false }));

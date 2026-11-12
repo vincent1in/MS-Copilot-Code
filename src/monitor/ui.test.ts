@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   applyEvent,
+  isTestSession,
+  landingTab,
   countLines,
   createState,
   describeCall,
@@ -97,5 +99,30 @@ describe("the page's formatting", () => {
     expect(countLines("a\nb\nc")).toBe(3);
     expect(linesLabel(1)).toBe("1 line");
     expect(linesLabel(2)).toBe("2 lines");
+  });
+});
+
+describe("the page's Set up side", () => {
+  it("learns from the hello whether there is a Set up backend, and passes change notices on", () => {
+    const state = createState();
+    applyEvent(state, { kind: "hello", setup: true });
+    expect(state.setup).toBe(true);
+    expect(applyEvent(state, { kind: "app-changed" })).toBe("app");
+  });
+
+  it("labels the connection test in Traffic", () => {
+    const state = createState();
+    const at = "2026-11-12T12:00:00.000Z";
+    applyEvent(state, { kind: "request", turn: "t", seq: 1, at, model: "gpt-6.1-sol", session: "connection-test-1a2b3c4d", total: 1, alreadySent: 0, messages: [] });
+    expect(summarizeTurn(state.turns.get("t")).meta).toEqual(["gpt-6.1-sol", "Test message"]);
+    expect(isTestSession("connection-test-x")).toBe(true);
+    expect(isTestSession("ses_123")).toBe(false);
+  });
+
+  it("opens on Set up until you are signed in and OpenCode is connected", () => {
+    expect(landingTab(null)).toBe("turns");
+    expect(landingTab({ account: null, opencode: { connected: true } })).toBe("setup");
+    expect(landingTab({ account: "a@b.c", opencode: { connected: false } })).toBe("setup");
+    expect(landingTab({ account: "a@b.c", opencode: { connected: true } })).toBe("turns");
   });
 });

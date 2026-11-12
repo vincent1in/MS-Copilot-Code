@@ -39,13 +39,13 @@ export const setup: Plugin.Plugin["setup"] = async (ctx: Plugin.Context) => {
     editor.add({ info, models } as never);
   });
 
-  if (runtime.options.setDefaultModel) {
-    await ctx.model.transform((editor) => {
-      // Re-checked on every replay: the user's own choice must keep winning.
-      if (editor.default.get()) return;
-      editor.default.set(PROVIDER_ID as never, DEFAULT_MODEL as never);
-    });
-  }
+  await ctx.model.transform((editor) => {
+    // Re-checked on every replay: the user's own choice must keep winning, and the
+    // setting can change on the app's Settings page while OpenCode runs.
+    if (!runtime.settings.current().setDefaultModel) return;
+    if (editor.default.get()) return;
+    editor.default.set(PROVIDER_ID as never, DEFAULT_MODEL as never);
+  });
 
   // opencode 2 has no `small_model` to point at the local titler, and the title
   // request's model is read-only here. Its headers are not, so we mark the kind and
@@ -61,8 +61,8 @@ export const setup: Plugin.Plugin["setup"] = async (ctx: Plugin.Context) => {
       event.headers[SESSION_ID_HEADER] = String(event.sessionID);
       return;
     }
-    if (!runtime.options.setSmallModel) return;
     if (event.kind !== "title") return;
+    if (!runtime.settings.current().localTitles) return;
     if (isLocalModel(event.model.id)) return;
     event.headers[AUX_REQUEST_KIND_HEADER] = event.kind;
   });
