@@ -173,6 +173,12 @@ export function launchOptions(candidate: { channel?: string; executablePath?: st
     timezoneId: env.M365_LOGIN_TIMEZONE || undefined,
     ...(env.M365_LOGIN_UA ? { userAgent: env.M365_LOGIN_UA } : {}),
     args: [...QUIET_BROWSER_ARGS],
+    // Playwright's own SIGTERM/SIGHUP handling closes the browser politely and waits for
+    // it, which never finishes if the page is stuck retrying a connection. The process
+    // that opened the window stops itself instead, and Playwright's exit hook then ends
+    // the browser for sure. (Ctrl+C keeps Playwright's handler, which kills at once.)
+    handleSIGTERM: false,
+    handleSIGHUP: false,
   };
 }
 

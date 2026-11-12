@@ -151,6 +151,9 @@ function doOpen(): void {
 async function doLogin(): Promise<void> {
   // Imported here so the heavy browser dependency never loads for other commands.
   const { login } = await import("./login.js");
+  // Asked to stop mid sign-in: exit now. Exiting runs Playwright's hook that ends the
+  // sign-in browser, so no window is left behind.
+  for (const signal of ["SIGTERM", "SIGHUP"] as const) process.once(signal, () => process.exit(signal === "SIGTERM" ? 143 : 129));
   try {
     const account = await login({
       browser: createSettingsStore().current().signInBrowser,
@@ -358,10 +361,14 @@ function portFrom(args: string[]): number | undefined {
 
 function stopOnSignal(handles: ({ close(): Promise<void> } | undefined)[]): void {
   const stop = () => {
-    void Promise.all(handles.map((handle) => handle?.close())).then(() => process.exit(0));
+    // Close cleanly when that is quick, and exit regardless after 3 s. Exiting also ends
+    // a sign-in browser this gateway opened (Playwright's exit hook).
+    setTimeout(() => process.exit(0), 3000);
+    void Promise.allSettled(handles.map((handle) => handle?.close())).then(() => process.exit(0));
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+  process.on("SIGHUP", stop);
 }
 
 main().catch((error) => {
