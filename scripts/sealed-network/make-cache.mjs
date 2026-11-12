@@ -2,9 +2,22 @@
 // client: no request leaves this process. `valid` holds a usable access token; `expired`
 // holds one that ran out, so the gateway has to refresh it at login.microsoftonline.com.
 import { createRequire } from "node:module";
-import { writeFileSync } from "node:fs";
-const require = createRequire(new URL("../../package.json", import.meta.url));
-const { PublicClientApplication } = require("@azure/msal-node");
+import { readdirSync, writeFileSync } from "node:fs";
+// MSAL from the checkout's node_modules, or, in the release folder (no node_modules for
+// it), the copy bundled into dist/.
+async function loadMsal() {
+  try {
+    return createRequire(new URL("../../package.json", import.meta.url))("@azure/msal-node");
+  } catch {
+    const dist = new URL("../../dist/", import.meta.url);
+    for (const file of readdirSync(dist).filter((f) => f.endsWith(".mjs") && f !== "cli.mjs")) {
+      const mod = await import(new URL(file, dist));
+      if (mod.PublicClientApplication) return mod;
+    }
+    throw new Error("MSAL not found in node_modules or dist/");
+  }
+}
+const { PublicClientApplication } = await loadMsal();
 const [dir, mode] = process.argv.slice(2);
 const CLIENT_ID = "c0ab8ce9-e9a0-42e7-b064-33d422df41f1";
 const SCOPES = ["https://substrate.office.com/sydney/M365Chat.Read", "https://substrate.office.com/sydney/sydney.readwrite"];
