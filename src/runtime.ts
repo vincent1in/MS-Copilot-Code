@@ -10,9 +10,13 @@
 
 import { getOrCreateAgent } from "./agent.js";
 import { createTokenClient } from "./auth.js";
-import { resolveOptions, studioAgentEnabled, webSearchEnabled, type PluginOptions } from "./config.js";
+import { resolveOptions, monitorEnabled, studioAgentEnabled, webSearchEnabled, type PluginOptions } from "./config.js";
 import { createLogger } from "./log.js";
+import { launchMonitor, type LaunchedMonitor } from "./monitor/launch.js";
+import { createMonitor } from "./monitor/monitor.js";
+import { DEFAULT_MODEL } from "./models.js";
 import { startServer } from "./server.js";
+import { workIqPolicy } from "./workiq.js";
 
 const log = createLogger("plugin");
 
@@ -86,18 +90,54 @@ export async function startRuntime(rawOptions?: Record<string, unknown>): Promis
   // creates anything in the tenant; tool turns go out agent-less.
   const useStudioAgent = studioAgentEnabled(options);
   log.info(`Copilot Studio agent: ${useStudioAgent ? "enabled (provisioned lazily on the first tool turn)" : "disabled"}`);
+  // The monitor is opt-in (see PluginOptions.monitor) and memory-only.
+  const monitor = monitorEnabled(options) ? createMonitor() : undefined;
+  const workIq = workIqPolicy(options);
+  const webSearch = webSearchEnabled(options);
   const proxy = await startServer({
     getToken: () => tokens.getToken(),
     ...(useStudioAgent
       ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
       : {}),
     lean: options.lean,
-    webSearch: webSearchEnabled(options),
+    webSearch,
+    workIq,
+    ...(monitor ? { monitor } : {}),
     // Normally absent, so the proxy mints a fresh secret for this launch.
     ...(sharedKey ? { apiKey: sharedKey } : {}),
     ...(options.leanSystemPrompt ? { leanSystemPrompt: LEAN_SYSTEM_PROMPT } : {}),
   });
 
   log.info(`M365 Copilot proxy listening on ${proxy.url}`);
-  return { baseUrl: `${proxy.url}/v1`, apiKey: proxy.apiKey, options, close: () => proxy.close() };
+  log.info(`replies drawn from work data (Work IQ): ${workIq}`);
+
+  let launched: LaunchedMonitor | undefined;
+  if (monitor) {
+    try {
+      launched = await launchMonitor(monitor, {
+        proxy: proxy.url,
+        defaultModel: DEFAULT_MODEL,
+        webSearch,
+        studioAgent: useStudioAgent,
+        lean: options.lean,
+        workIq,
+      });
+      // The link carries the page's secret, so it is not logged: the CLI reads it from
+      // an owner-only file instead.
+      log.info("gateway monitor is on; run `opencode-m365 monitor` for its link");
+    } catch (error) {
+      // A monitor that cannot start must not take the gateway down with it.
+      log.warn("gateway monitor could not start; continuing without it", String(error));
+    }
+  }
+
+  return {
+    baseUrl: `${proxy.url}/v1`,
+    apiKey: proxy.apiKey,
+    options,
+    close: async () => {
+      await launched?.close();
+      await proxy.close();
+    },
+  };
 }

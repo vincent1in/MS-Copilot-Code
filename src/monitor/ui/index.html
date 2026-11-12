@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Gateway monitor</title>
+    <link rel="stylesheet" href="/monitor.css" />
+    <script type="module" src="/monitor.js"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-top">
+        <h1>Gateway monitor</h1>
+        <p class="link-state" id="link-state" role="status" aria-live="polite">Connecting…</p>
+        <div class="controls">
+          <label class="follow"><input type="checkbox" id="follow" checked /> Follow new turns</label>
+          <button type="button" id="pause" aria-pressed="false">Pause</button>
+          <button type="button" id="clear">Clear</button>
+        </div>
+      </div>
+      <dl class="facts" id="facts" aria-label="Gateway settings"></dl>
+    </header>
+
+    <nav class="views" aria-label="Views">
+      <button type="button" class="view" id="view-turns" aria-current="page">Turns</button>
+      <button type="button" class="view" id="view-checks">Checks</button>
+    </nav>
+
+    <main id="main">
+      <section class="turns-view" id="turns-view" aria-label="Turns">
+        <ol class="turn-list" id="turn-list" aria-label="Turns, oldest first" tabindex="0"></ol>
+        <article class="turn" id="turn" aria-live="off"></article>
+      </section>
+      <section class="checks-view" id="checks-view" aria-label="All checks" hidden>
+        <table class="check-table">
+          <caption>Every check the gateway ran, newest first</caption>
+          <thead>
+            <tr><th scope="col">Time</th><th scope="col">Check</th><th scope="col">Result</th><th scope="col">What happened</th></tr>
+          </thead>
+          <tbody id="check-rows"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <footer class="colophon">
+      <p>
+        Kept in memory only. The gateway and this page hold these records until you press Clear or the gateway
+        stops; nothing is written to disk.
+      </p>
+      <p>
+        Everything on the Microsoft 365 side has reached Microsoft. Your organization's Copilot audit log records
+        each turn, and the text can be kept under your organization's retention policies.
+      </p>
+    </footer>
+  </body>
+</html>

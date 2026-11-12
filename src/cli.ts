@@ -13,12 +13,16 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTokenClient } from "./auth.js";
 import { getOrCreateAgent } from "./agent.js";
-import { PROVIDER_ID, mergeOpencodeConfig, studioAgentEnabled, webSearchEnabled, type PluginPathInfo } from "./config.js";
+import { PROVIDER_ID, mergeOpencodeConfig, monitorEnabled, studioAgentEnabled, webSearchEnabled, type PluginPathInfo } from "./config.js";
 import { checkTones, distinctTones } from "./live-check.js";
 import { DEFAULT_MODEL, LOCAL_TITLE_MODEL, MODELS } from "./models.js";
 import { CopilotSession } from "./session.js";
 import { startServer } from "./server.js";
 import { AGENT_FILE, CACHE_FILE, CONFIG_DIR, SECRETS_FILE } from "./paths.js";
+import { launchMonitor, type LaunchedMonitor } from "./monitor/launch.js";
+import { listMonitorLinks } from "./monitor/links.js";
+import { createMonitor } from "./monitor/monitor.js";
+import { workIqPolicy } from "./workiq.js";
 
 const OPENCODE_CONFIG = join(homedir(), ".config", "opencode", "opencode.json");
 
@@ -34,6 +38,8 @@ async function main(): Promise<void> {
       return doServe(rest);
     case "doctor":
       return doDoctor(rest);
+    case "monitor":
+      return doMonitor();
     case "help":
     case "--help":
     case "-h":
@@ -52,8 +58,13 @@ function printHelp(): void {
                           hand, once) and store the token cache
   setup                   Point ~/.config/opencode/opencode.json at this checkout's
                           build (never at an npm package name)
-  serve [--port <n>]      Run the OpenAI-compatible proxy standalone
-                          (key from M365_PROXY_KEY, else printed)
+  serve [--port <n>] [--monitor]
+                          Run the OpenAI-compatible proxy standalone
+                          (key from M365_PROXY_KEY, else printed); --monitor
+                          also opens the gateway monitor and prints its link
+  monitor                 Print the link to the gateway monitor of each gateway
+                          running with it on (plugin: { "monitor": true } or
+                          M365_MONITOR=1)
   doctor [--live]         Check auth, the proxy and opencode wiring (read-only:
                           never provisions the Copilot Studio agent)
                           (--live also sends one short message per model tone)
@@ -61,7 +72,10 @@ function printHelp(): void {
 Config lives in ${CONFIG_DIR}
 
 Sign-in is interactive only. Use a browser you already have with
-M365_BROWSER_CHANNEL=msedge (or chrome), or CHROMIUM_PATH=/path/to/browser.`);
+M365_BROWSER_CHANNEL=msedge (or chrome), or CHROMIUM_PATH=/path/to/browser.
+
+Replies Copilot draws from your work data (Work IQ) are held by default;
+M365_WORK_IQ=flag or allow changes that.`);
 }
 
 async function doLogin(args: string[]): Promise<void> {
@@ -159,22 +173,41 @@ async function doServe(args: string[]): Promise<void> {
   const fixedKey = process.env.M365_PROXY_KEY || undefined;
 
   const useStudioAgent = studioAgentEnabled();
+  const webSearch = webSearchEnabled();
+  const workIq = workIqPolicy();
+  const monitor = args.includes("--monitor") || monitorEnabled() ? createMonitor() : undefined;
   const proxy = await startServer({
     getToken: () => tokens.getToken(),
     // Opt-in only (M365_STUDIO_AGENT=1): provisioning creates a bot in the tenant.
     ...(useStudioAgent
       ? { resolveAgent: () => getOrCreateAgent({ getTokenForScope: (scopes) => tokens.getTokenForScope(scopes) }) }
       : {}),
-    webSearch: webSearchEnabled(),
+    webSearch,
+    workIq,
+    ...(monitor ? { monitor } : {}),
     port,
     ...(fixedKey ? { apiKey: fixedKey } : {}),
   });
+  let launched: LaunchedMonitor | undefined;
+  if (monitor) {
+    launched = await launchMonitor(monitor, {
+      proxy: proxy.url,
+      defaultModel: DEFAULT_MODEL,
+      webSearch,
+      studioAgent: useStudioAgent,
+      lean: true,
+      workIq,
+    });
+  }
 
   console.log(`M365 Copilot proxy listening on ${proxy.url}`);
   console.log(`  models:      ${proxy.url}/v1/models`);
   console.log(`  completions: ${proxy.url}/v1/chat/completions`);
   console.log(`  studio agent: ${useStudioAgent ? "enabled (M365_STUDIO_AGENT=1)" : "disabled — nothing is created in your tenant"}`);
-  console.log(`  web search:   ${webSearchEnabled() ? "enabled (M365_WEB_SEARCH=1)" : "disabled — Copilot is not offered Bing on coding turns"}`);
+  console.log(`  web search:   ${webSearch ? "enabled (M365_WEB_SEARCH=1)" : "disabled — Copilot is not offered Bing on coding turns"}`);
+  console.log(`  work data:    ${describeWorkIq(workIq)}`);
+  console.log(`  monitor:      ${launched ? launched.link : "off — add --monitor (or M365_MONITOR=1) to see every turn"}`);
+  if (launched) console.log("                (this link is the key to the page; it lives in memory and stops with the proxy)");
   console.log("\nLoopback-only. Every request must send `Authorization: Bearer <key>`;");
   console.log("browser origins and CORS are refused.");
   if (fixedKey) {
@@ -188,8 +221,29 @@ async function doServe(args: string[]): Promise<void> {
   console.log("Ctrl+C to stop.");
 
   process.on("SIGINT", () => {
-    void proxy.close().then(() => process.exit(0));
+    void Promise.all([launched?.close(), proxy.close()]).then(() => process.exit(0));
   });
+}
+
+function describeWorkIq(policy: string): string {
+  if (policy === "hold") return "held — a reply Copilot drew from your email, files or chats never reaches opencode (M365_WORK_IQ)";
+  if (policy === "flag") return "flagged — such replies pass through and are marked in the monitor (M365_WORK_IQ=flag)";
+  return "allowed — such replies pass through (M365_WORK_IQ=allow)";
+}
+
+function doMonitor(): void {
+  const links = listMonitorLinks();
+  if (links.length === 0) {
+    console.log("No gateway is running with the monitor on.");
+    console.log('Turn it on with { "monitor": true } in the plugin options or M365_MONITOR=1 before');
+    console.log("starting opencode, or run `opencode-m365 serve --monitor`.");
+    return;
+  }
+  for (const entry of links) {
+    console.log(`Gateway ${entry.pid}, started ${new Date(entry.startedAt).toLocaleString()} (proxy ${entry.proxy}):`);
+    console.log(`  ${entry.link}`);
+  }
+  console.log("\nOpen the link in a browser on this machine. It carries the page's key, so don't share it.");
 }
 
 async function doDoctor(args: string[]): Promise<void> {
@@ -228,6 +282,12 @@ async function doDoctor(args: string[]): Promise<void> {
     console.log("  ..    enabled — provisioned lazily on the first tool turn");
   }
   console.log(`  ..    cache — ${existsSync(AGENT_FILE) ? AGENT_FILE : "none"}`);
+
+  console.log("\nPrivacy");
+  console.log(`  ..    work data (Work IQ) — ${describeWorkIq(workIqPolicy())}`);
+  console.log(
+    `  ..    gateway monitor — ${monitorEnabled() ? "on (M365_MONITOR=1); `opencode-m365 monitor` prints its link" : 'off. Turn on with { "monitor": true } or M365_MONITOR=1'}`,
+  );
 
   console.log("\nProxy");
   try {

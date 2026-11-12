@@ -15,6 +15,7 @@ import {
   PACKAGE_NAME,
   resolveOptions,
   selectLeanTools,
+  monitorEnabled,
   studioAgentEnabled,
   webSearchEnabled,
 } from "./config.js";
@@ -526,5 +527,29 @@ describe("the v2 catalog entry, against opencode 2's own schema", () => {
     expect(() => decode({ ...model, status: "retired" })).toThrow();
     expect(() => decode({ ...model, limit: { context: "lots", output: 1 } })).toThrow();
     expect(() => decode({ ...model, capabilities: { tools: true, input: ["text"] } })).toThrow();
+  });
+});
+
+describe("monitor and Work IQ options", () => {
+  it("keeps the monitor off unless asked for", () => {
+    const saved = process.env.M365_MONITOR;
+    delete process.env.M365_MONITOR;
+    try {
+      expect(resolveOptions({}).monitor).toBe(false);
+      expect(monitorEnabled(resolveOptions({}))).toBe(false);
+      expect(monitorEnabled(resolveOptions({ monitor: true }))).toBe(true);
+      process.env.M365_MONITOR = "1";
+      expect(monitorEnabled(resolveOptions({}))).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.M365_MONITOR;
+      else process.env.M365_MONITOR = saved;
+    }
+  });
+
+  it("accepts only a known Work IQ policy", () => {
+    expect(resolveOptions({ workIq: "flag" }).workIq).toBe("flag");
+    expect(resolveOptions({ workIq: "hold" }).workIq).toBe("hold");
+    expect(resolveOptions({ workIq: "everything" as never }).workIq).toBeUndefined();
+    expect(resolveOptions({}).workIq).toBeUndefined();
   });
 });

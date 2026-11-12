@@ -36,6 +36,11 @@ import { collectImages } from "./image.js";
 import { parseToolCalls } from "./fenced.js";
 import { looksLikeGiveUp, nudgeFor } from "./giveup.js";
 import { createLogger, redact } from "./log.js";
+import type { Monitor } from "./monitor/monitor.js";
+import { recordEgress } from "./monitor/egress-feed.js";
+import { turnScope } from "./monitor/scope.js";
+import { TurnRecorder, summarizeMessages } from "./monitor/turn.js";
+import { DEFAULT_WORK_IQ_POLICY, WorkDataHeldError, describeGrounding, judgeGrounding, type WorkIqPolicy } from "./workiq.js";
 
 const log = createLogger("server");
 
@@ -75,6 +80,13 @@ export interface ServerDeps {
   allowMultiTool?: boolean;
   /** Offer Copilot's Bing web search plugin on agent-less turns. Off by default. */
   webSearch?: boolean;
+  /**
+   * What to do with a reply Copilot grounded in your work data (Work IQ): `hold` it
+   * (the default — opencode gets an error instead), `flag` it, or `allow` it.
+   */
+  workIq?: WorkIqPolicy;
+  /** Records every turn for the gateway monitor. Absent, nothing is recorded. */
+  monitor?: Monitor;
   /**
    * Trim the harness's toolset before the model sees it.
    *
@@ -189,10 +201,18 @@ export async function startServer(deps: ServerDeps): Promise<ProxyHandle> {
     });
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(deps.port ?? 0, host, resolve);
-  });
+  // The monitor's checks trail hears every allowlist decision while this server runs.
+  const stopEgressFeed = deps.monitor ? recordEgress(deps.monitor) : () => {};
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(deps.port ?? 0, host, resolve);
+    });
+  } catch (error) {
+    stopEgressFeed();
+    throw error;
+  }
 
   const { port } = server.address() as AddressInfo;
   const urlHost = host.includes(":") ? `[${host}]` : host;
@@ -202,6 +222,7 @@ export async function startServer(deps: ServerDeps): Promise<ProxyHandle> {
     apiKey,
     close: () =>
       new Promise<void>((resolve) => {
+        stopEgressFeed();
         server.closeAllConnections?.();
         server.close(() => resolve());
       }),
@@ -344,7 +365,8 @@ async function handleChatCompletion(
   // that cannot select the titler by id says so on the header instead; opencode 2
   // dropped `small_model`, and its title hook cannot change the model.
   if (isLocalModel(model.id) || request.headers[AUX_REQUEST_KIND_HEADER] === "title") {
-    respondWithTitle(response, body, model.id);
+    const title = respondWithTitle(response, body, model.id);
+    context.deps.monitor?.emit({ kind: "title", model: model.id, title });
     return;
   }
 
@@ -360,7 +382,13 @@ async function handleChatCompletion(
   conversation.turn = previous.then(() => current);
   await previous;
   try {
-    await runTurn(request, response, context, body, conversation, model, tools);
+    const offered = requested.map((tool) => tool.function.name);
+    const recorder = new TurnRecorder(context.deps.monitor);
+    // Everything this turn does — token refresh, uploads, the chat socket — runs in
+    // its scope, so the monitor can tie each outbound connection to the turn.
+    await turnScope.run(recorder.id, () =>
+      runTurn(request, response, context, body, conversation, model, tools, offered, sessionId, recorder),
+    );
   } finally {
     release();
   }
@@ -406,6 +434,9 @@ async function runTurn(
   conversation: Conversation,
   model: ReturnType<typeof resolveModel>,
   tools: ToolDef[],
+  offered: readonly string[],
+  sessionId: string | undefined,
+  recorder: TurnRecorder,
 ): Promise<void> {
   // The pool's restart check ran before we queued; re-run it now that the previous
   // turn has recorded what it sent.
@@ -418,6 +449,7 @@ async function runTurn(
   // Every tools-derived decision below reads `effectiveTools`. (Upstream emptied it
   // for mailbox-grounded models, which this fork removes.)
   const effectiveTools = tools;
+  const workIq = context.deps.workIq ?? DEFAULT_WORK_IQ_POLICY;
 
   // Only the messages this turn carries: M365 already has any earlier image.
   const images = collectImages(body.messages, conversation.sentMessageCount);
@@ -431,6 +463,8 @@ async function runTurn(
     ...(note ? { note } : {}),
   });
 
+  if (recorder.watching) recordRequest(recorder, body, conversation, model, effectiveTools, offered, sessionId, images.length, prompt);
+
   // The agent overrides the tone and forces GPT, so attach it only when the turn
   // actually needs tool instructions. Plain chat then reaches the tone's real model.
   const agent = effectiveTools.length > 0 && route.agent ? await context.agentId() : null;
@@ -443,8 +477,10 @@ async function runTurn(
   const streaming = body.stream === true;
   const streamId = `chatcmpl-${randomUUID()}`;
   // Only a tool-less turn can stream: a fenced tool call is not parseable until the
-  // fence closes, so a tool turn has to be buffered and emitted at the end.
-  const canStreamText = streaming && effectiveTools.length === 0;
+  // fence closes, so a tool turn has to be buffered and emitted at the end. Under the
+  // `hold` Work IQ policy nothing streams either: the evidence that a reply drew on
+  // work data can arrive with its last frame, after the text would have gone out.
+  const canStreamText = streaming && effectiveTools.length === 0 && workIq !== "hold";
 
   if (streaming) startSse(response);
 
@@ -479,13 +515,16 @@ async function runTurn(
     });
 
   try {
+    let started = Date.now();
     let result = await conversation.session.run(prompt, {
       ...turnOptions,
+      observer: recorder.observer(1, false),
       ...(images.length > 0 ? { images } : {}),
       ...(canStreamText
         ? { onDelta: (chunk: string) => response.write(streamChunk(streamId, model.id, { content: chunk })) }
         : {}),
     });
+    recorder.reply(1, result, Date.now() - started);
 
     // A tool turn answered with "I have no tools" is a stochastic give-up, not an
     // answer: ask once more in the same conversation, which costs a message but
@@ -496,35 +535,127 @@ async function runTurn(
       looksLikeGiveUp(result.text)
     ) {
       recordTurn(result);
+      recorder.check(
+        "give-up",
+        "info",
+        "Copilot said it could not act on the files instead of taking a step. The gateway asked once more, in the same conversation.",
+      );
       const midTask = body.messages.some((message) => message.role === "tool");
-      result = await conversation.session.run(nudgeFor(midTask, route.framing), turnOptions);
+      started = Date.now();
+      result = await conversation.session.run(nudgeFor(midTask, route.framing), { ...turnOptions, observer: recorder.observer(2, true) });
+      recorder.reply(2, result, Date.now() - started);
       recordTurn(result, { nudged: true });
     } else {
       recordTurn(result);
+    }
+
+    // Work IQ: did Copilot search or cite anything to write this? Checked before the
+    // reply goes anywhere, so a held reply never reaches opencode.
+    const grounding = recorder.grounding();
+    const judgement = judgeGrounding(grounding, workIq, context.deps.webSearch === true);
+    if (judgement) {
+      const summary = describeGrounding(grounding);
+      recorder.check("work-data", judgement.verdict, summary, grounding.signals);
+      if (judgement.hold) throw new WorkDataHeldError(summary);
     }
 
     // +1 for the reply the client is about to append to its history: M365 already
     // has that turn, and sending it back would paste its own answer in as user input.
     conversation.sentMessageCount = body.messages.length + 1;
     const allowMultiple = context.deps.allowMultiTool ?? false;
-    conversation.note = noteAbout(parseToolCalls(result.text, effectiveTools, { allowMultiple }));
+    const parsed = parseToolCalls(result.text, effectiveTools, { allowMultiple });
+    conversation.note = noteAbout(parsed);
+    if (recorder.watching) {
+      recorder.result({
+        toolCalls: parsed.toolCalls.map((call) => ({ name: call.name, arguments: JSON.stringify(call.arguments, null, 2) })),
+        text: parsed.text,
+        skippedCalls: parsed.skippedCalls,
+        inventedResult: parsed.inventedResult,
+        ...(conversation.note ? { note: conversation.note } : {}),
+        streamed: canStreamText,
+      });
+    }
 
     if (!streaming) {
-      sendJson(response, 200, buildCompletion(result, { model: model.id, tools: effectiveTools, allowMultiple: context.deps.allowMultiTool ?? false }));
+      sendJson(response, 200, buildCompletion(result, { model: model.id, tools: effectiveTools, allowMultiple }));
       return;
     }
 
-    finishStream(response, streamId, model.id, result, effectiveTools, canStreamText, context.deps.allowMultiTool ?? false);
+    finishStream(response, streamId, model.id, result, effectiveTools, canStreamText, allowMultiple);
   } catch (error) {
     logTurn({ error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) });
-    if (error instanceof DisengagedError) {
-      // A disengaged conversation stays disengaged. Drop it, so the next request
-      // opens a fresh one and replays the whole history into it.
+    if (error instanceof DisengagedError || error instanceof WorkDataHeldError) {
+      // A disengaged conversation stays disengaged, and a held one holds work data in
+      // Copilot's context. Drop it, so the next request opens a fresh one and replays
+      // the whole history into it.
       conversation.session.reset();
       conversation.sentMessageCount = 0;
+      recorder.check(
+        "conversation",
+        "info",
+        `${error instanceof DisengagedError ? "Copilot disengaged" : "The reply was held"}, so the gateway dropped this Copilot conversation. The next request opens a fresh one and replays the history.`,
+      );
     }
+    recorder.error(failureCode(error), error instanceof Error ? error.message : String(error));
     handleTurnFailure(response, error, streaming, effectiveTools.length);
   }
+}
+
+/** The monitor's view of opencode's request, and the checks that run before sending. */
+function recordRequest(
+  recorder: TurnRecorder,
+  body: ChatRequest,
+  conversation: Conversation,
+  model: ReturnType<typeof resolveModel>,
+  tools: readonly ToolDef[],
+  offered: readonly string[],
+  sessionId: string | undefined,
+  images: number,
+  prompt: string,
+): void {
+  const kept = tools.map((tool) => tool.function.name);
+  recorder.request({
+    conversation: conversation.key.slice(0, 14),
+    ...(sessionId ? { session: sessionId } : {}),
+    model: model.id,
+    tone: model.tone,
+    stream: body.stream === true,
+    total: body.messages.length,
+    alreadySent: conversation.sentMessageCount,
+    messages: summarizeMessages(body.messages.slice(conversation.sentMessageCount), body.messages),
+    toolsOffered: [...offered],
+    toolsKept: kept,
+    images,
+  });
+  if (offered.length !== kept.length) {
+    const keptNames = new Set(kept);
+    const dropped = offered.filter((name) => !keptNames.has(name));
+    recorder.check(
+      "tools",
+      "info",
+      `opencode offered ${offered.length} tools and the gateway passed on ${kept.length}, because Copilot stops engaging when it is offered a dozen or so. Left out: ${dropped.join(", ")}.`,
+    );
+  }
+  if (conversation.session?.turnIndex === 0) {
+    recorder.check(
+      "conversation",
+      "info",
+      "This turn opens a new Copilot conversation, so the gateway sends the whole history. Microsoft throttles accounts that start conversations quickly.",
+    );
+  }
+  recorder.scanOutgoing(prompt);
+}
+
+/** The code each failure reaches opencode with; the monitor shows the same one. */
+function failureCode(error: unknown): string {
+  if (error instanceof AuthRequiredError) return "authentication_required";
+  if (error instanceof DisengagedError) return "m365_disengaged";
+  if (error instanceof M365ThrottledError) return "m365_throttled";
+  if (error instanceof M365UnavailableError) return "m365_not_served";
+  if (error instanceof TurnRejectedError) return "m365_turn_rejected";
+  if (error instanceof WorkDataHeldError) return "m365_work_data_held";
+  if ((error as Error)?.name === "AbortError") return "cancelled";
+  return "upstream_error";
 }
 
 /**
@@ -606,6 +737,11 @@ function handleTurnFailure(response: ServerResponse, error: unknown, streaming: 
     return;
   }
 
+  if (error instanceof WorkDataHeldError) {
+    refuse(response, streaming, "m365_work_data_held", error.message);
+    return;
+  }
+
   const message = error instanceof Error ? error.message : String(error);
   if ((error as Error)?.name === "AbortError") {
     if (!response.writableEnded) response.end();
@@ -654,7 +790,7 @@ function finishWithError(
   }
 }
 
-function respondWithTitle(response: ServerResponse, body: ChatRequest, model: string): void {
+function respondWithTitle(response: ServerResponse, body: ChatRequest, model: string): string {
   const title = generateTitle(body.messages);
 
   if (body.stream !== true) {
@@ -666,7 +802,7 @@ function respondWithTitle(response: ServerResponse, body: ChatRequest, model: st
       choices: [{ index: 0, message: { role: "assistant", content: title }, finish_reason: "stop" }],
       usage: buildUsage({ text: title }),
     });
-    return;
+    return title;
   }
 
   const streamId = `chatcmpl-${randomUUID()}`;
@@ -675,6 +811,7 @@ function respondWithTitle(response: ServerResponse, body: ChatRequest, model: st
   response.write(streamChunk(streamId, model, { finishReason: "stop" }));
   response.write(streamDone());
   response.end();
+  return title;
 }
 
 // --- plumbing -------------------------------------------------------------------
