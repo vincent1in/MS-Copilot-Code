@@ -18,8 +18,9 @@ export const OPENCODE_CONFIG = process.env.M365_OPENCODE_CONFIG || join(homedir(
 
 /**
  * OpenCode's own outside traffic that its config can switch off, checked against the
- * schema of OpenCode 2.2.6 (`@opencode/schema`): update checks, session sharing, and
- * its built-in web search tool. The model catalogue download has no config key.
+ * schema of OpenCode 2.2.6 and 2.4.2 (`@opencode/schema`): update checks, session
+ * sharing, and its built-in web search tool. The model catalogue download has no
+ * config key.
  */
 export const OPENCODE_QUIET: Readonly<Record<"update" | "share" | "websearch", unknown>> = {
   update: "disable",

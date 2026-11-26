@@ -200,6 +200,12 @@ language servers and formatters (`lsp`, `formatter`), MCP servers, `skills` and
 OpenTelemetry export runs only once you configure an endpoint. For the rest, such as how it
 gets its list of models, see OpenCode's own documentation.
 
+Two OpenCode 2.4 settings send prompts to your model without you typing them, which here
+means messages to Copilot. `automations` (on unless you set it to `false`) runs prompts,
+shell commands or Code Mode actions on a timer, a schedule or an MCP server's event.
+`warming` (off unless you turn it on) sends a keep-alive prompt every few minutes; leave it
+off here, since each one counts against the conversation's 600 messages.
+
 **npm** isn't needed for the release. In a source checkout, `.npmrc` turns off npm's update
 check, funding notices and the dependency report it would send on every install, and never
 runs install scripts.

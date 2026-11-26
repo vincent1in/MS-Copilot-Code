@@ -48,7 +48,29 @@ tries to contact by itself.
 
 Nothing is loaded from outside this checkout: the bundle's only runtime `require`s are
 Node built-ins (ws's optional native add-ons are stubbed out), and `login` loads
-Playwright only from this checkout's own `node_modules`.
+Playwright only from this checkout's own `node_modules`. The status line's TUI half loads
+OpenCode's own Solid runtime (`@opentui/solid`, `solid-js`), which OpenCode provides to
+plugins; nothing is fetched for it.
+
+What Copilot receives is what OpenCode sends it. Two settings, both off by default, add to
+that: Bing web search (Copilot may search the web with parts of your code), and MCP tool
+search (Copilot is sent the names, descriptions and arguments of the MCP tools it searches
+for, and their results). Every model this fork lists is on M365's included scenario; the
+paid scenario and the models that need it or bill Copilot credits are left out.
+
+## Installing and updating
+
+`install.sh` and `install.ps1` download two files, the release zip and its `.sha256`, from
+this repository's latest GitHub release (`github.com`, which hands the download to
+`release-assets.githubusercontent.com`). They check the zip's SHA-256, then every file in
+it against `SHA256SUMS`, and install nothing on a mismatch. They write only the gateway's
+folder, never OpenCode's config, and run no installer. Given a zip with `--zip` (`-Zip`),
+they download nothing. The gateway itself never updates or downloads anything.
+
+Releases are built by `.github/workflows/release.yml`, which runs only when the repository's
+owner starts it from `main`. A checksum shows a download is intact and matches what the
+release published; it can't vouch for the release itself. To check that too, rebuild the
+zip's `dist/` from its own source and compare (see SECURITY_REVIEW.md, *Re-verify it yourself*).
 
 ## The local proxy
 
