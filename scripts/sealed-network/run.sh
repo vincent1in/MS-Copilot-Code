@@ -23,7 +23,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 GW=$(cd "$HERE/../.." && pwd)
 OUT=${1:-$GW/sealed-network-result}
 rm -rf "$OUT"; mkdir -p "$OUT"
-cleanup() { [ -n "$SINK" ] && kill $SINK 2>/dev/null; [ -n "$DUMP" ] && kill $DUMP 2>/dev/null; ip netns del gwns 2>/dev/null; ip netns del sinkns 2>/dev/null; rm -rf /etc/netns/gwns; }
+cleanup() { [ -n "$SINK" ] && kill "$SINK" 2>/dev/null; [ -n "$DUMP" ] && kill "$DUMP" 2>/dev/null; ip netns del gwns 2>/dev/null; ip netns del sinkns 2>/dev/null; rm -rf /etc/netns/gwns; }
 trap cleanup EXIT
 cleanup
 

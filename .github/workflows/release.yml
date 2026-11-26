@@ -1,0 +1,198 @@
+name: Release
+
+# Publishes the release zip and the install scripts as a GitHub release, when you press
+# "Run workflow" on the Actions tab. Nothing runs it automatically.
+#
+# Security posture (see SECURITY_REVIEW.md, and ci.yml for the shared parts):
+# - Runs only when started by hand, only from main, one run at a time.
+# - Third-party actions are pinned to full commit SHAs, the same ones as ci.yml.
+# - The token can write releases only in the job that publishes, and only the step
+#   that calls `gh release create` is given it. Checkout keeps no credentials.
+# - Dependencies install from the lockfile with lifecycle scripts disabled. The
+#   typecheck, build and tests then run with no route off the machine, as in ci.yml,
+#   and so does the check that the installer, given the zip, downloads nothing.
+# - The release's tag is v<version from package.json>, created by this workflow at the
+#   commit it built. A version that is already released is refused, not replaced.
+# - After publishing, the README's install commands are run on Linux, macOS and
+#   Windows against the new release.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Read the version, and refuse one that is already released
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$version is already released. Bump the version in package.json and CHANGELOG.md first."
+            exit 1
+          fi
+          grep -q "^## $version " CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install from the lockfile, no lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck, build and test with no route off the machine
+        env:
+          NODE_OPTIONS: --require ./scripts/net-guard.cjs
+          NET_GUARD_BLOCK: "1"
+          NET_GUARD_LOG: ${{ runner.temp }}/net-guard.jsonl
+        run: |
+          sudo unshare --net -- env PATH="$PATH" sh -ec '
+            ip link set lo up
+            exec sudo -u "$1" env PATH="$PATH" HOME="$2" NODE_OPTIONS="$3" NET_GUARD_BLOCK=1 NET_GUARD_LOG="$4" \
+              sh -ec "npm run typecheck && npm run build && npx --no-install vitest run"
+          ' sh "$(id -un)" "$HOME" "$NODE_OPTIONS" "$NET_GUARD_LOG"
+
+      - name: Check every connection the tests attempted
+        run: |
+          node -e '
+            const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse);
+            const attempts = lines.filter((l) => l.kind !== "loaded" && !l.local);
+            const selfTest = attempts.filter((l) => String(l.host).endsWith(".invalid"));
+            const remote = attempts.filter((l) => !String(l.host).endsWith(".invalid"));
+            console.log(`${lines.filter((l) => l.kind === "loaded").length} Node processes/threads guarded; ${remote.length} non-loopback attempts`);
+            for (const r of remote) console.log(`  BLOCKED ${r.kind} ${r.host}:${r.port ?? "-"} ${r.url ?? ""}`);
+            process.exitCode = remote.length > 0 || selfTest.length === 0 ? 1 : 0;
+          ' "${{ runner.temp }}/net-guard.jsonl"
+
+      - name: Build the release zip
+        run: sh scripts/release.sh
+
+      - name: Install the zip with install.sh, with no route off the machine
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          zip="$PWD/release/opencode-m365-copilot-$VERSION.zip"
+          dest="$RUNNER_TEMP/installed"
+          sudo unshare --net -- env PATH="$PATH" sh -ec '
+            ip link set lo up
+            exec sudo -u "$1" env PATH="$PATH" HOME="$2" sh -ec "sh install.sh --zip \"$3\" --dir \"$4\" --no-start && node \"$4/dist/cli.mjs\" help >/dev/null"
+          ' sh "$(id -un)" "$HOME" "$zip" "$dest"
+          grep -q "^opencode-m365-copilot $VERSION$" "$dest/BUILD-INFO.txt"
+
+      - name: Write the release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          notes="$RUNNER_TEMP/notes.md"
+          awk -v head="## $VERSION " 'index($0, head) == 1 { keep = 1; next } /^## / { keep = 0 } keep' CHANGELOG.md > "$notes"
+          {
+            echo ""
+            echo "## Install or update"
+            echo ""
+            echo "macOS or Linux:"
+            echo ""
+            echo '```sh'
+            echo "curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh | sh"
+            echo '```'
+            echo ""
+            echo "Windows (PowerShell):"
+            echo ""
+            echo '```powershell'
+            echo "irm https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.ps1 | iex"
+            echo '```'
+            echo ""
+            echo "Both download \`opencode-m365-copilot.zip\` and its \`.sha256\` from this release, check the zip and every file in it, and install into one folder that later runs update in place. Or download the zip, check it, and unzip it yourself."
+            echo ""
+            echo "## Checks"
+            echo ""
+            echo '```'
+            cat "release/opencode-m365-copilot-$VERSION.zip.sha256"
+            echo '```'
+            echo ""
+            echo "Built and tested with no route off the machine by [this workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), from commit $GITHUB_SHA. \`opencode-m365-copilot.zip\` is the same file under a name that stays the same from release to release."
+          } >> "$notes"
+          cat "$notes"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd release
+          cp "opencode-m365-copilot-$VERSION.zip" opencode-m365-copilot.zip
+          sha256sum opencode-m365-copilot.zip > opencode-m365-copilot.zip.sha256
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "opencode-m365-copilot-$VERSION.zip" \
+            "opencode-m365-copilot-$VERSION.zip.sha256" \
+            opencode-m365-copilot.zip \
+            opencode-m365-copilot.zip.sha256 \
+            ../install.sh \
+            ../install.ps1
+
+  install:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install with the README's command (macOS, Linux)
+        if: runner.os != 'Windows'
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          dest="$RUNNER_TEMP/gateway"
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh" | sh -s -- --no-start --dir "$dest"
+          grep -q "^opencode-m365-copilot $VERSION$" "$dest/BUILD-INFO.txt"
+          node "$dest/dist/cli.mjs" help >/dev/null
+          # A second run updates the same folder in place.
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh" | sh -s -- --no-start --dir "$dest"
+          node "$dest/dist/cli.mjs" help >/dev/null
+
+      - name: Install with the README's command (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          M365_INSTALL_NO_START: "1"
+        run: |
+          $env:M365_GATEWAY_DIR = Join-Path $env:RUNNER_TEMP 'gateway'
+          irm "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/install.ps1" | iex
+          $info = Get-Content -LiteralPath (Join-Path $env:M365_GATEWAY_DIR 'BUILD-INFO.txt') -TotalCount 1
+          if ($info -ne "opencode-m365-copilot $env:VERSION") { throw "installed '$info', not $env:VERSION" }
+          & node (Join-Path $env:M365_GATEWAY_DIR 'dist\cli.mjs') help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the gateway's CLI failed" }
+          # A second run updates the same folder in place.
+          irm "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/install.ps1" | iex
+          & node (Join-Path $env:M365_GATEWAY_DIR 'dist\cli.mjs') help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the gateway's CLI failed after the update" }
