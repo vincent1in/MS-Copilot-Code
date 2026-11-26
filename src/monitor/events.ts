@@ -3,8 +3,9 @@
  * gateway ran along the way. The browser page (`ui/monitor.js`) reads exactly these
  * shapes, so a change here is a change there.
  *
- * A *turn* is one request from opencode. It may take two Copilot attempts (the second
- * being the follow-up sent after a give-up), so the per-attempt events carry `attempt`.
+ * A *turn* is one request from opencode. It may take more than one Copilot message —
+ * the follow-up sent after a give-up, and, with MCP tool search on, the gateway's
+ * answers to Copilot's searches — so the per-message events carry `attempt`.
  */
 
 export type GroundingKind = "work" | "web" | "unknown";
@@ -27,7 +28,8 @@ export type CheckName =
   | "give-up"
   | "tools"
   | "refusal"
-  | "conversation";
+  | "conversation"
+  | "mcp";
 
 export type Verdict = "allowed" | "denied" | "held" | "flagged" | "info";
 
@@ -67,6 +69,8 @@ export type MonitorEventBody =
       attempt: number;
       /** The follow-up after a give-up, rather than opencode's own request. */
       nudge: boolean;
+      /** The gateway's answer to Copilot's search of the MCP tools (MCP tool search on). */
+      mcpAnswer?: boolean;
       host: string;
       path: string;
       /** The connection's query parameters, without the access token. */

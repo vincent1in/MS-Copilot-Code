@@ -58,8 +58,12 @@ export class TurnRecorder {
     );
   }
 
-  /** The observer for one Copilot attempt: collects grounding evidence, and records when watched. */
-  observer(attempt: number, nudge: boolean): TurnObserver {
+  /**
+   * The observer for one Copilot message: collects grounding evidence, and records when
+   * watched. `nudge`: the follow-up after a give-up. `mcpAnswer`: the gateway's answer
+   * to Copilot's search of the MCP tools.
+   */
+  observer(attempt: number, nudge: boolean, mcpAnswer = false): TurnObserver {
     const signals: GroundingSignal[] = [];
     this.attemptSignals.set(attempt, signals);
     const collect = (found: GroundingSignal[]) => {
@@ -75,6 +79,7 @@ export class TurnRecorder {
           turn: this.id,
           attempt,
           nudge,
+          ...(mcpAnswer ? { mcpAnswer: true } : {}),
           host: frame.host,
           path: frame.path,
           params: frame.params,

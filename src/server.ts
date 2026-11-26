@@ -14,10 +14,34 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { AuthRequiredError } from "./auth.js";
-import type { ToolDef } from "./fenced.js";
+import type { ParsedToolCall, ToolDef } from "./fenced.js";
 import { DEFAULT_MODEL, isLocalModel, listModelIds, resolveModel, toolRouteFor } from "./models.js";
 import { LEAN_SYSTEM_PROMPT, describeToolSelection, selectLeanTools } from "./config.js";
-import { CopilotSession, DisengagedError, M365ThrottledError, M365UnavailableError, TurnRejectedError, type TurnResult } from "./session.js";
+import { parseCodeModeCatalog, type CodeModeCatalog } from "./codemode.js";
+import {
+  MCP_TOOL_NAME,
+  callCode,
+  executeCodeToMcp,
+  mcpTool,
+  parseMcpBlock,
+  renderInvalidMcpBlock,
+  renderMcpFence,
+  renderSearchResult,
+  renderUnknownTool,
+  resolveCallPath,
+  searchCatalog,
+  searchCode,
+} from "./mcp.js";
+import {
+  CopilotSession,
+  DisengagedError,
+  M365ThrottledError,
+  M365UnavailableError,
+  PremiumLicenceRequiredError,
+  PriorityAccessExhaustedError,
+  TurnRejectedError,
+  type TurnResult,
+} from "./session.js";
 import { createPrivateAppender } from "./private-fs.js";
 import {
   ChatCompletionRequest,
@@ -25,17 +49,22 @@ import {
   buildCompletion,
   buildTurnPrompt,
   buildUsage,
+  contentOf,
   generateTitle,
   streamChunk,
   streamDone,
+  streamUsageChunk,
+  estimateCompletionTokens,
+  estimatePromptTokens,
   toOpenAiToolCall,
   type ChatRequest,
   type ConversationState,
 } from "./translate.js";
 import { collectImages } from "./image.js";
-import { parseToolCalls } from "./fenced.js";
+import { firstFenceBody, parseToolCalls } from "./fenced.js";
 import { looksLikeGiveUp, nudgeFor } from "./giveup.js";
 import { createLogger, redact } from "./log.js";
+import { METRICS_PATH, SessionMetricsStore } from "./metrics.js";
 import type { Monitor } from "./monitor/monitor.js";
 import { recordEgress } from "./monitor/egress-feed.js";
 import { turnScope } from "./monitor/scope.js";
@@ -84,7 +113,7 @@ export interface ServerDeps {
   /**
    * The settings in force, read once per request, so a change on the app's Settings
    * page applies from the next message. When given, it overrides `lean`,
-   * `leanSystemPrompt`, `webSearch` and `workIq` above.
+   * `leanSystemPrompt`, `webSearch`, `workIq` and `mcpProxy`.
    */
   settings?: () => LiveSettings;
   /**
@@ -101,6 +130,14 @@ export interface ServerDeps {
    * does not affect the outgoing request — see `condenseSystemPrompt`.
    */
   leanSystemPrompt?: string;
+  /**
+   * Give Copilot one `mcp` tool for opencode 2's MCP tools. Off (the default), the
+   * proxy strips the Code Mode catalogue and never offers `execute`, so M365 sees no
+   * MCP tool at all. On, a search is answered here from the catalogue — sending the
+   * matching tools' names, descriptions and arguments to M365 — and a call becomes an
+   * `execute` call for opencode to run.
+   */
+  mcpProxy?: boolean;
   /**
    * Receives one entry per M365 turn: the raw reply, what was parsed from it, and
    * M365's diagnostics. Defaults to a JSONL file at `M365_TURN_LOG` when that is set,
@@ -126,6 +163,11 @@ export interface ServerDeps {
   allowedOrigins?: readonly string[];
   /** Largest request body accepted, in bytes. */
   maxBodyBytes?: number;
+  /**
+   * Where per-session metrics go (model, quota, context, allowances), keyed by the
+   * {@link SESSION_ID_HEADER}. A fresh one is made when this is omitted.
+   */
+  metrics?: SessionMetricsStore;
 }
 
 /** The settings a request reads. A subset of `GatewaySettings` (see settings.ts). */
@@ -134,6 +176,7 @@ export interface LiveSettings {
   webSearch: boolean;
   lean: boolean;
   leanSystemPrompt: boolean;
+  mcpProxy: boolean;
 }
 
 /** What one request runs with: the live settings when given, else the fixed deps. */
@@ -143,6 +186,7 @@ interface RequestSettings {
   lean: boolean;
   /** The replacement system prompt, when one is in force. */
   leanSystemPrompt?: string;
+  mcpProxy: boolean;
 }
 
 function requestSettings(deps: ServerDeps): RequestSettings {
@@ -153,6 +197,7 @@ function requestSettings(deps: ServerDeps): RequestSettings {
       webSearch: live.webSearch,
       lean: live.lean,
       ...(live.leanSystemPrompt ? { leanSystemPrompt: LEAN_SYSTEM_PROMPT } : {}),
+      mcpProxy: live.mcpProxy,
     };
   }
   return {
@@ -160,6 +205,7 @@ function requestSettings(deps: ServerDeps): RequestSettings {
     webSearch: deps.webSearch === true,
     lean: deps.lean !== false,
     ...(deps.leanSystemPrompt !== undefined ? { leanSystemPrompt: deps.leanSystemPrompt } : {}),
+    mcpProxy: deps.mcpProxy === true,
   };
 }
 
@@ -168,6 +214,8 @@ export interface ProxyHandle {
   port: number;
   /** The bearer secret a client must send. */
   apiKey: string;
+  /** Per-session metrics for opencode's UI, served by the plugin over RPC. */
+  metrics: SessionMetricsStore;
   close(): Promise<void>;
 }
 
@@ -189,6 +237,17 @@ interface Conversation extends ConversationState {
   turn?: Promise<void>;
 }
 
+/**
+ * `mcp` blocks the proxy answers itself per request — searches, unknown paths and
+ * unreadable blocks — before the reply goes back to the client as it is.
+ */
+export const MAX_MCP_SEARCHES = 3;
+
+/** opencode 2's tool that runs Code Mode JavaScript: the proxy emits it, M365 never sees it. */
+const EXECUTE_TOOL_NAME = "execute";
+
+const isExecute = (tool: ToolDef) => tool.function.name.toLowerCase() === EXECUTE_TOOL_NAME;
+
 export async function startServer(deps: ServerDeps): Promise<ProxyHandle> {
   const pool = new ConversationPool();
   const host = deps.host ?? "127.0.0.1";
@@ -203,10 +262,11 @@ export async function startServer(deps: ServerDeps): Promise<ProxyHandle> {
     );
   }
   const maxBodyBytes = deps.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const metrics = deps.metrics ?? new SessionMetricsStore();
 
   const portOf = () => (server.address() as AddressInfo).port;
   const server = createServer((request, response) => {
-    handle(request, response, { deps, pool, apiKey, maxBodyBytes, port: portOf() }).catch((error) => {
+    handle(request, response, { deps, pool, apiKey, maxBodyBytes, metrics, port: portOf() }).catch((error) => {
       log.error("unhandled request failure", String(error));
       sendError(response, 500, "internal_error", String(error));
     });
@@ -231,6 +291,7 @@ export async function startServer(deps: ServerDeps): Promise<ProxyHandle> {
     url: `http://${urlHost}:${port}`,
     port,
     apiKey,
+    metrics,
     close: () =>
       new Promise<void>((resolve) => {
         stopEgressFeed();
@@ -245,6 +306,7 @@ interface Context {
   pool: ConversationPool;
   apiKey: string;
   maxBodyBytes: number;
+  metrics: SessionMetricsStore;
   port: number;
 }
 
@@ -327,6 +389,19 @@ async function handle(request: IncomingMessage, response: ServerResponse, contex
     return;
   }
 
+  // The session's metrics, for a plugin attached to this proxy with `baseUrl`: the
+  // store lives here, out of that opencode process's reach (`remoteMetrics`).
+  if (method === "GET" && url.pathname.startsWith(`/v1${METRICS_PATH}`)) {
+    let sessionID = "";
+    try {
+      sessionID = decodeURIComponent(url.pathname.slice(`/v1${METRICS_PATH}`.length));
+    } catch {
+      // A malformed escape names no session.
+    }
+    sendJson(response, 200, { metrics: (sessionID && context.metrics.get(sessionID)) || null });
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/v1/chat/completions") {
     await handleChatCompletion(request, response, context);
     return;
@@ -359,9 +434,9 @@ async function handleChatCompletion(
   const model = resolveModel(body.model);
   const settings = requestSettings(context.deps);
   const requested = (body.tools ?? []) as ToolDef[];
-  const tools = settings.lean ? selectLeanTools(requested) : requested;
-  if (tools.length !== requested.length) {
-    log.info(`trimmed toolset ${requested.length} -> ${tools.length}`, tools.map((t) => t.function.name).join(","));
+  const kept = settings.lean ? selectLeanTools(requested) : requested;
+  if (kept.length !== requested.length) {
+    log.info(`trimmed toolset ${requested.length} -> ${kept.length}`, kept.map((t) => t.function.name).join(","));
     // Reached only when the trim actually removed something, which cannot happen
     // with lean off. Warn once per process rather than per turn: a drifted
     // allowlist is a standing condition, not a per-request event.
@@ -370,6 +445,18 @@ async function handleChatCompletion(
       warnedAboutToolSelection = true;
       log.warn(concern);
     }
+  }
+
+  // opencode 2 lists its MCP tools in the system prompt's Code Mode catalogue, callable
+  // only through `execute`. With the proxy on, M365 gets neither: one `mcp` tool stands
+  // in for the whole catalogue, and the proxy turns its calls into `execute` calls.
+  const catalog = settings.mcpProxy ? mcpCatalogFor(body, requested) : undefined;
+  const tools = catalog ? [...kept.filter((tool) => !isExecute(tool)), mcpTool(catalog.tools, catalog.partial)] : kept;
+  if (catalog) {
+    log.info(
+      `offering mcp over ${catalog.tools.length}${catalog.partial ? "+" : ""} Code Mode tools`,
+      catalog.tools.map((tool) => tool.path).join(","),
+    );
   }
 
   // The titler never touches M365 — see models.ts for why that matters. A harness
@@ -381,8 +468,7 @@ async function handleChatCompletion(
     return;
   }
 
-  const sessionHeader = request.headers[SESSION_ID_HEADER];
-  const sessionId = typeof sessionHeader === "string" && sessionHeader !== "" ? sessionHeader : undefined;
+  const sessionId = sessionIdOf(request);
   const conversation = context.pool.resolve(body.messages, sessionId ? { sessionId } : {}) as Conversation;
 
   // Serialise turns per conversation: two overlapping requests on one CopilotSession
@@ -398,11 +484,17 @@ async function handleChatCompletion(
     // Everything this turn does — token refresh, uploads, the chat socket — runs in
     // its scope, so the monitor can tie each outbound connection to the turn.
     await turnScope.run(recorder.id, () =>
-      runTurn(request, response, context, settings, body, conversation, model, tools, offered, sessionId, recorder),
+      runTurn(request, response, context, settings, body, conversation, model, tools, offered, sessionId, recorder, catalog, requested),
     );
   } finally {
     release();
   }
+}
+
+/** opencode's session id, from {@link SESSION_ID_HEADER}, when the request names one. */
+function sessionIdOf(request: IncomingMessage): string | undefined {
+  const header = request.headers[SESSION_ID_HEADER];
+  return typeof header === "string" && header !== "" ? header : undefined;
 }
 
 export interface TurnLogEntry {
@@ -421,6 +513,13 @@ export interface TurnLogEntry {
   resultValue?: string;
   /** This turn was the follow-up sent after a give-up. */
   nudged?: boolean;
+  /** This turn was the reply to an `mcp` search the proxy answered; the query. */
+  mcpSearch?: string;
+  /**
+   * This turn's reply was an `mcp` call the proxy sent to opencode as an `execute`
+   * call: the tool's path, or `search` for opencode's own search.
+   */
+  mcpCall?: string;
   error?: string;
 }
 
@@ -448,6 +547,8 @@ async function runTurn(
   offered: readonly string[],
   sessionId: string | undefined,
   recorder: TurnRecorder,
+  catalog: CodeModeCatalog | undefined,
+  requested: readonly ToolDef[],
 ): Promise<void> {
   // The pool's restart check ran before we queued; re-run it now that the previous
   // turn has recorded what it sent.
@@ -461,20 +562,29 @@ async function runTurn(
   // for mailbox-grounded models, which this fork removes.)
   const effectiveTools = tools;
   const workIq = settings.workIq;
+  // With the MCP tool search on: OpenCode's Code Mode catalogue, which the proxy
+  // searches itself. A parsed reply may name any tool but `mcp`, which is the proxy's
+  // own; `execute` reaches opencode only as the proxy's translation of an `mcp` call.
+  const mcp = catalog;
+  const clientTools = mcp ? effectiveTools.filter((tool) => tool.function.name !== MCP_TOOL_NAME) : effectiveTools;
+  const executeName = requested.find(isExecute)?.function.name ?? EXECUTE_TOOL_NAME;
 
-  // Only the messages this turn carries: M365 already has any earlier image.
-  const images = collectImages(body.messages, conversation.sentMessageCount);
   const note = effectiveTools.length > 0 && conversation.sentMessageCount > 0 ? conversation.note : undefined;
   conversation.note = undefined;
+  // Only the messages this turn carries: M365 already has any earlier image.
+  const images = collectImages(body.messages, conversation.sentMessageCount);
   const route = toolRouteFor(model.tone);
-  const prompt = buildTurnPrompt(body.messages, effectiveTools, conversation.sentMessageCount, {
+  const prompt = buildTurnPrompt(mcp ? relabelProxyCalls(body.messages) : body.messages, effectiveTools, conversation.sentMessageCount, {
     framing: route.framing,
     ...(route.sandbox ? { sandbox: route.sandbox } : {}),
     ...(settings.leanSystemPrompt !== undefined ? { leanSystemPrompt: settings.leanSystemPrompt } : {}),
     ...(note ? { note } : {}),
+    // A past call may name a tool this turn's tool block leaves out.
+    ...(effectiveTools.length > 0 ? { historyTools: [...effectiveTools, ...requested] } : {}),
+    ...(mcp ? { renderCall: renderProxyCall } : {}),
   });
 
-  if (recorder.watching) recordRequest(recorder, body, conversation, model, effectiveTools, offered, sessionId, images.length, prompt);
+  if (recorder.watching) recordRequest(recorder, body, conversation, model, effectiveTools, offered, sessionId, images.length, prompt, mcp);
 
   const abort = new AbortController();
   request.on("close", () => {
@@ -507,7 +617,17 @@ async function runTurn(
     ...(settings.webSearch ? { webSearch: true } : {}),
     signal: abort.signal,
   };
-  const recordTurn = (result: TurnResult, extra: Partial<TurnLogEntry> = {}) =>
+  // The whole context opencode sent, as it sent it: its context meter wants that size.
+  const promptTokens = estimatePromptTokens(body.messages, body.tools);
+  const recordTurn = (result: TurnResult, extra: Partial<TurnLogEntry> = {}) => {
+    if (sessionId) {
+      context.metrics.recordTurn(sessionId, {
+        model,
+        contextTokens: promptTokens,
+        ...(result.throttle ? { throttle: result.throttle } : {}),
+        ...(result.metering ? { metering: result.metering } : {}),
+      });
+    }
     logTurn({
       reply: result.text,
       toolCalls: parseToolCalls(result.text, effectiveTools).toolCalls.map((call) => call.name),
@@ -518,18 +638,23 @@ async function runTurn(
       ...(result.resultValue ? { resultValue: result.resultValue } : {}),
       ...extra,
     });
+  };
 
+  // The Copilot messages this request sends: opencode's, then any follow-up or answer
+  // to an `mcp` search, numbered for the monitor.
+  let attempt = 1;
+  let logged: Partial<TurnLogEntry> = {};
   try {
     let started = Date.now();
     let result = await conversation.session.run(prompt, {
       ...turnOptions,
-      observer: recorder.observer(1, false),
+      observer: recorder.observer(attempt, false),
       ...(images.length > 0 ? { images } : {}),
       ...(canStreamText
         ? { onDelta: (chunk: string) => response.write(streamChunk(streamId, model.id, { content: chunk })) }
         : {}),
     });
-    recorder.reply(1, result, Date.now() - started);
+    recorder.reply(attempt, result, Date.now() - started);
 
     // A tool turn answered with "I have no tools" is a stochastic give-up, not an
     // answer: ask once more in the same conversation, which costs a message but
@@ -546,13 +671,67 @@ async function runTurn(
         "Copilot said it could not act on the files instead of taking a step. The gateway asked once more, in the same conversation.",
       );
       const midTask = body.messages.some((message) => message.role === "tool");
+      attempt += 1;
       started = Date.now();
-      result = await conversation.session.run(nudgeFor(midTask, route.framing), { ...turnOptions, observer: recorder.observer(2, true) });
-      recorder.reply(2, result, Date.now() - started);
-      recordTurn(result, { nudged: true });
-    } else {
-      recordTurn(result);
+      result = await conversation.session.run(nudgeFor(midTask, route.framing), { ...turnOptions, observer: recorder.observer(attempt, true) });
+      recorder.reply(attempt, result, Date.now() - started);
+      logged = { nudged: true };
     }
+
+    // An `mcp` block: a search is answered here, in the same conversation — one extra
+    // M365 message, not a new conversation — and so is a path that is not a tool or a
+    // block that cannot be read. Capped, so a model that keeps asking cannot spend the
+    // request. A call to a real tool becomes an `execute` call for opencode to run.
+    let proxyCall: ParsedToolCall | undefined;
+    for (let answered = 0; mcp; ) {
+      if (parseToolCalls(result.text, effectiveTools).toolCalls[0]?.name !== MCP_TOOL_NAME) break;
+      const ask = parseMcpBlock(firstFenceBody(result.text, MCP_TOOL_NAME) ?? "");
+
+      let answer: string;
+      let summary: string;
+      let next: Partial<TurnLogEntry> = {};
+      if (ask.kind === "call") {
+        const path = resolveCallPath(ask.path, mcp.tools, mcp.partial);
+        if (path) {
+          proxyCall = { name: executeName, arguments: { code: callCode(path, ask.args) } };
+          logged = { ...logged, mcpCall: path };
+          recorder.check("mcp", "info", `Copilot asked to run the MCP tool ${path}. The gateway passed it to OpenCode as an ${executeName} call, for OpenCode to run.`);
+          break;
+        }
+        answer = renderUnknownTool(ask.path);
+        summary = `Copilot asked for an MCP tool OpenCode does not list (${ask.path}). The gateway told it so.`;
+      } else if (ask.kind === "search") {
+        const matches = searchCatalog(ask.query, mcp.tools);
+        if (matches.length === 0 && mcp.partial) {
+          // opencode knows tools its catalogue leaves out: ask its own search.
+          proxyCall = { name: executeName, arguments: { code: searchCode(ask.query) } };
+          logged = { ...logged, mcpCall: "search" };
+          recorder.check("mcp", "info", `Copilot searched your MCP tools for "${ask.query}". OpenCode's list had no match, so the gateway passed the search to OpenCode.`);
+          break;
+        }
+        answer = renderSearchResult(ask.query, matches, mcp.tools.length);
+        summary = `Copilot searched your MCP tools for "${ask.query}". The gateway answered from OpenCode's list with ${matches.length === 1 ? "1 tool" : `${matches.length} tools`}: names, descriptions and arguments.`;
+        next = { mcpSearch: ask.query };
+      } else {
+        answer = renderInvalidMcpBlock(ask.reason);
+        summary = "Copilot wrote an mcp block the gateway could not read. The gateway told it what was wrong.";
+      }
+
+      if (answered >= MAX_MCP_SEARCHES) {
+        recorder.check("mcp", "info", `Copilot kept using the mcp tool after ${MAX_MCP_SEARCHES} answers, so the gateway stopped answering and sent OpenCode the reply's text.`);
+        break;
+      }
+      answered += 1;
+      recordTurn(result, logged);
+      recorder.check("mcp", "info", `${summary} That is one more message to Copilot, in the same conversation.`);
+      attempt += 1;
+      started = Date.now();
+      result = await conversation.session.run(answer, { ...turnOptions, observer: recorder.observer(attempt, false, true) });
+      recorder.reply(attempt, result, Date.now() - started);
+      logged = next;
+    }
+    recordTurn(result, logged);
+    if (mcp && !proxyCall) result = { ...result, text: stripMcpCalls(result.text) };
 
     // Work IQ: did Copilot search or cite anything to write this? Checked before the
     // reply goes anywhere, so a held reply never reaches opencode.
@@ -568,7 +747,9 @@ async function runTurn(
     // has that turn, and sending it back would paste its own answer in as user input.
     conversation.sentMessageCount = body.messages.length + 1;
     const allowMultiple = context.deps.allowMultiTool ?? false;
-    const parsed = parseToolCalls(result.text, effectiveTools, { allowMultiple });
+    const parsed = proxyCall
+      ? { toolCalls: [proxyCall], text: "", skippedCalls: 0, inventedResult: false }
+      : parseToolCalls(result.text, clientTools, { allowMultiple });
     conversation.note = noteAbout(parsed);
     if (recorder.watching) {
       recorder.result({
@@ -582,13 +763,28 @@ async function runTurn(
     }
 
     if (!streaming) {
-      sendJson(response, 200, buildCompletion(result, { model: model.id, tools: effectiveTools, allowMultiple }));
+      sendJson(
+        response,
+        200,
+        buildCompletion(result, {
+          model: model.id,
+          tools: clientTools,
+          allowMultiple,
+          promptTokens,
+          ...(proxyCall ? { toolCalls: [proxyCall] } : {}),
+        }),
+      );
       return;
     }
 
-    finishStream(response, streamId, model.id, result, effectiveTools, canStreamText, allowMultiple);
+    finishStream(response, streamId, model.id, parsed, canStreamText, {
+      ...(body.stream_options?.include_usage ? { usage: { result, promptTokens } } : {}),
+    });
   } catch (error) {
     logTurn({ error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) });
+    const refusal =
+      error instanceof PriorityAccessExhaustedError ? "allowance" : error instanceof PremiumLicenceRequiredError ? "licence" : undefined;
+    if (sessionId && refusal) context.metrics.recordRefusal(sessionId, { model, reason: refusal, message: (error as Error).message });
     if (error instanceof DisengagedError || error instanceof WorkDataHeldError) {
       // A disengaged conversation stays disengaged, and a held one holds work data in
       // Copilot's context. Drop it, so the next request opens a fresh one and replays
@@ -617,6 +813,7 @@ function recordRequest(
   sessionId: string | undefined,
   images: number,
   prompt: string,
+  mcp: CodeModeCatalog | undefined,
 ): void {
   const kept = tools.map((tool) => tool.function.name);
   recorder.request({
@@ -632,13 +829,22 @@ function recordRequest(
     toolsKept: kept,
     images,
   });
-  if (offered.length !== kept.length) {
-    const keptNames = new Set(kept);
-    const dropped = offered.filter((name) => !keptNames.has(name));
+  const keptNames = new Set(kept);
+  // With the MCP tool search on, `execute` is replaced rather than left out.
+  const dropped = offered.filter((name) => !keptNames.has(name) && !(mcp && name.toLowerCase() === EXECUTE_TOOL_NAME));
+  if (dropped.length > 0) {
     recorder.check(
       "tools",
       "info",
-      `OpenCode offered ${offered.length} tools and the gateway passed on ${kept.length}, because Copilot stops engaging when it is offered a dozen or so. Left out: ${dropped.join(", ")}.`,
+      `OpenCode offered ${offered.length} tools and the gateway passed on ${kept.length - (mcp ? 1 : 0)} of them, because Copilot stops engaging when it is offered a dozen or so. Left out: ${dropped.join(", ")}.`,
+    );
+  }
+  if (mcp) {
+    const count = mcp.partial ? `at least ${mcp.tools.length}` : String(mcp.tools.length);
+    recorder.check(
+      "mcp",
+      "info",
+      `MCP tool search is on: Copilot got one mcp tool in place of OpenCode's execute tool and its list of ${count} MCP tools. Copilot sees a tool's name, description and arguments only when it searches for it.`,
     );
   }
   if (conversation.session?.turnIndex === 0) {
@@ -681,26 +887,96 @@ export function noteAbout(parsed: { toolCalls: { name: string }[]; skippedCalls:
   return lines.length > 0 ? lines.join(" ") : undefined;
 }
 
+/**
+ * Drop every `mcp` block from a reply. Past the search cap the client gets the
+ * reply's prose (and any real call in it), never a call to the proxy's own tool.
+ */
+export function stripMcpCalls(text: string): string {
+  const stripped = text.replace(MCP_FENCE, "");
+  // A reply with no `mcp` block is left exactly as M365 wrote it.
+  return stripped === text ? text : stripped.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+const MCP_FENCE = /^[ \t]*(`{3,}|~{3,})[ \t]*mcp(?![\w-])[^\n]*\n[\s\S]*?^[ \t]*\1[ \t]*$\n?/gim;
+
+/**
+ * opencode 2's Code Mode catalogue for a request, when the proxy should stand in for
+ * it: the system prompt carries one, and the request offers `execute` to run calls.
+ */
+function mcpCatalogFor(body: ChatRequest, requested: readonly ToolDef[]): CodeModeCatalog | undefined {
+  if (!requested.some(isExecute)) return undefined;
+  const systemText = body.messages
+    .filter((message) => message.role === "system" || message.role === "developer")
+    .map(contentOf)
+    .join("\n\n");
+  const catalog = parseCodeModeCatalog(systemText);
+  return catalog && (catalog.tools.length > 0 || catalog.partial) ? catalog : undefined;
+}
+
+/** The code of an `execute` call's raw arguments, if it has one. */
+function executeCode(rawArguments: string): string | undefined {
+  try {
+    const args: unknown = JSON.parse(rawArguments || "{}");
+    const code = (args as { code?: unknown } | null)?.code;
+    return typeof code === "string" ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Name the proxy's own `execute` calls `mcp` in the history, so they replay as the
+ * `mcp` blocks the model wrote and their results are labelled as the `mcp` tool's.
+ * Any other `execute` call is left as it is.
+ */
+function relabelProxyCalls(messages: ChatRequest["messages"]): ChatRequest["messages"] {
+  return messages.map((message) => {
+    if (!message.tool_calls?.some((call) => call.function.name.toLowerCase() === EXECUTE_TOOL_NAME)) return message;
+    return {
+      ...message,
+      tool_calls: message.tool_calls.map((call) =>
+        call.function.name.toLowerCase() === EXECUTE_TOOL_NAME && executeCodeToMcp(executeCode(call.function.arguments))
+          ? { ...call, function: { ...call.function, name: MCP_TOOL_NAME } }
+          : call,
+      ),
+    };
+  });
+}
+
+/** A relabelled call, written back as its `mcp` block. */
+function renderProxyCall(name: string, rawArguments: string): string | undefined {
+  if (name !== MCP_TOOL_NAME) return undefined;
+  const request = executeCodeToMcp(executeCode(rawArguments));
+  return request ? renderMcpFence(request) : undefined;
+}
+
 /** Emit the closing frames of a streamed turn. */
 function finishStream(
   response: ServerResponse,
   streamId: string,
   model: string,
-  result: { text: string },
-  tools: readonly ToolDef[],
+  parsed: { toolCalls: readonly ParsedToolCall[]; text: string },
   alreadyStreamedText: boolean,
-  allowMultiple: boolean,
+  options: { usage?: { result: TurnResult; promptTokens: number } } = {},
 ): void {
-  const { toolCalls, text } = parseToolCalls(result.text, tools, { allowMultiple });
+  const { toolCalls, text } = parsed;
+  const openAiCalls = toolCalls.length > 0 ? toolCalls.map(toOpenAiToolCall) : undefined;
 
-  if (toolCalls.length > 0) {
-    response.write(streamChunk(streamId, model, { toolCalls: toolCalls.map(toOpenAiToolCall) }));
+  if (openAiCalls) {
+    response.write(streamChunk(streamId, model, { toolCalls: openAiCalls }));
     response.write(streamChunk(streamId, model, { finishReason: "tool_calls" }));
   } else {
     // If we streamed deltas the client already has the text; sending it again would
     // duplicate the answer.
     if (!alreadyStreamedText && text) response.write(streamChunk(streamId, model, { content: text }));
     response.write(streamChunk(streamId, model, { finishReason: "stop" }));
+  }
+
+  // Asked for with `stream_options.include_usage`, which opencode sends by default.
+  if (options.usage) {
+    const { result, promptTokens } = options.usage;
+    const completionTokens = estimateCompletionTokens(openAiCalls ? null : text, openAiCalls);
+    response.write(streamUsageChunk(streamId, model, buildUsage(result, { promptTokens, completionTokens })));
   }
 
   response.write(streamDone());
@@ -733,7 +1009,7 @@ function handleTurnFailure(response: ServerResponse, error: unknown, streaming: 
   }
 
   if (error instanceof M365UnavailableError) {
-    refuse(response, streaming, "m365_not_served", error.message);
+    refuse(response, streaming, "m365_not_served", error.message, error.reason);
     return;
   }
 
@@ -766,12 +1042,12 @@ function handleTurnFailure(response: ServerResponse, error: unknown, streaming: 
  * limit. Type `invalid_request_error` switches off the "try again" rule; the rate
  * limit wording is reworded, since that rule ignores the type.
  */
-function refuse(response: ServerResponse, streaming: boolean, code: string, message: string): void {
+function refuse(response: ServerResponse, streaming: boolean, code: string, message: string, param?: string): void {
   const reworded = message
     .replace(/rate increased too quickly/gi, "sent too fast")
     .replace(/rate[-_\s]?limit/gi, "throttle")
     .replace(/too[_\s]?many[_\s]?requests/gi, "too many turns");
-  finishWithError(response, streaming, NON_RETRYABLE, code, reworded, "invalid_request_error");
+  finishWithError(response, streaming, NON_RETRYABLE, code, reworded, "invalid_request_error", param);
 }
 
 /** Report an error, in whichever shape the client is already reading. */
@@ -782,14 +1058,17 @@ function finishWithError(
   code: string,
   message: string,
   type: string = code,
+  param?: string,
 ): void {
+  // `param` says which refusal it was, for a client that wants to act on it.
+  const error = { message, type, code, ...(param ? { param } : {}) };
   if (!streaming) {
-    if (!response.writableEnded) sendJson(response, status, { error: { message, type, code } });
+    if (!response.writableEnded) sendJson(response, status, { error });
     return;
   }
   // Headers are already out on a stream; the error has to ride in the body.
   if (!response.writableEnded) {
-    response.write(`data: ${JSON.stringify({ error: { message, code, type } })}\n\n`);
+    response.write(`data: ${JSON.stringify({ error })}\n\n`);
     response.write(streamDone());
     response.end();
   }

@@ -239,7 +239,7 @@ export function buildToolPrompt(tools: readonly ToolDef[], options: PromptOption
 }
 
 /** One tool's one-line description and fence template. */
-function describeTool(tool: ToolDef): string[] {
+export function describeTool(tool: ToolDef): string[] {
   const shape = shapeOf(tool);
   const lines: string[] = [];
   const description = tool.function.description?.trim();
@@ -391,6 +391,18 @@ function extractFences(source: string): Fence[] {
   return fences;
 }
 
+/**
+ * The body of the first closed fence whose info string names `name` (case-insensitive),
+ * or undefined. For a tool whose body the proxy reads itself rather than mapping it
+ * onto parameters.
+ */
+export function firstFenceBody(source: string, name: string): string | undefined {
+  const wanted = name.toLowerCase();
+  return extractFences(unglueFenceOpeners(source.replace(/\r\n?/g, "\n"))).find(
+    (fence) => (fence.info.split(/\s+/)[0] ?? "").toLowerCase() === wanted,
+  )?.body;
+}
+
 function charOffset(lines: string[], lineIndex: number): number {
   let offset = 0;
   for (let i = 0; i < lineIndex && i < lines.length; i += 1) offset += lines[i]!.length + 1;
@@ -465,13 +477,25 @@ export interface ParseOptions {
   allowMultiple?: boolean;
 }
 
+/**
+ * Move a fence opener glued to the end of a prose line onto its own line.
+ *
+ * M365 sometimes writes `…before drafting anything.```shell` with no line break, so the
+ * block rendered as text, nothing ran, and the user had to say "resume" (seen live,
+ * 2026-11-19). Only an opener with an info word ends the line; an inline ```bash```
+ * span does not match, and an unclosed fence is still ignored by `extractFences`.
+ */
+export function unglueFenceOpeners(text: string): string {
+  return text.replace(/^(.*[^`\s])(`{3,}[A-Za-z][\w-]*)[ \t]*$/gm, "$1\n$2");
+}
+
 /** Parse a raw M365 response into OpenAI-shaped tool calls plus any prose. */
 export function parseToolCalls(
   source: string,
   tools: readonly ToolDef[],
   options: ParseOptions = {},
 ): ParseResult {
-  const cleaned = stripInventedJson(source.replace(/\r\n?/g, "\n"));
+  const cleaned = unglueFenceOpeners(stripInventedJson(source.replace(/\r\n?/g, "\n")));
   const none = (text: string): ParseResult => ({ toolCalls: [], text, skippedCalls: 0, inventedResult: false });
 
   if (tools.length === 0) return none(cleaned);

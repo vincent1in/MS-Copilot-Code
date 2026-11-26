@@ -117,9 +117,62 @@ export class M365ThrottledError extends Error {
  * this account's licence does not cover, or a tone that is registered but dead.
  */
 export class M365UnavailableError extends Error {
-  constructor(detail: string) {
+  /** Why, when M365 said so in a way the client can act on. */
+  readonly reason?: string;
+  constructor(detail: string, reason?: string) {
     super(`M365 could not serve this model: ${detail}`);
     this.name = "M365UnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * The paid scenario on a seat without a premium Copilot licence: the final item carries
+ * `result.value: "ForbiddenRequest"` and `errorCode: "InvalidCopilotLicense"`, and
+ * BotConnection explains in words. It is about the account, not the model.
+ */
+export class PremiumLicenceRequiredError extends M365UnavailableError {
+  constructor(said: string) {
+    super(
+      `it needs a premium Microsoft 365 Copilot licence, which this account does not have (InvalidCopilotLicense). Choose a model on the included scenario.${said ? ` M365 said: ${said}` : ""}`,
+      "premium_licence_required",
+    );
+    this.name = "PremiumLicenceRequiredError";
+  }
+}
+
+/**
+ * `result: InternalError` with no content in the update frames, only (at most) an
+ * apology in the final item. Upstream reads it as a dead agent route and re-sends the
+ * turn agent-less; this fork attaches no agent, so it is an ordinary refusal.
+ */
+export class EmptyInternalError extends M365UnavailableError {
+  constructor(detail: string) {
+    super(detail);
+    this.name = "EmptyInternalError";
+  }
+}
+
+/** Which priority-access allowance ran out. */
+export type AllowanceWindow = "day" | "week";
+
+/**
+ * A metered model's priority-access allowance is used up: `result.value:
+ * "OutOfCredits"`, the refusal text in `result.message`. The refusal is not streamed,
+ * so a reader of the updates alone would see an empty turn. Both allowances reset at
+ * midnight UTC, the weekly one on Monday (reference project, docs §5 / quirk #26).
+ */
+export class PriorityAccessExhaustedError extends M365UnavailableError {
+  readonly window: AllowanceWindow;
+  constructor(said: string) {
+    const window: AllowanceWindow = /\bweek|monday/i.test(said) ? "week" : "day";
+    const resets = window === "week" ? "midnight UTC on Monday" : "midnight UTC";
+    super(
+      `this model's ${window === "week" ? "weekly" : "daily"} priority-access allowance is used up; it resets at ${resets}. Choose another model until then.${said ? ` M365 said: ${said}` : ""}`,
+      "priority_access_exhausted",
+    );
+    this.name = "PriorityAccessExhaustedError";
+    this.window = window;
   }
 }
 
@@ -132,6 +185,12 @@ export interface TurnResult {
   text: string;
   /** Per-conversation quota, when the server reported it. */
   throttle?: ThrottleState;
+  /**
+   * The account's priority-access allowances, remaining turns by M365's key
+   * (`ClaudeOpusQueryDaily`, `ClaudeOpusQuery75`, ...). Only paid-scenario turns carry
+   * them; an included-scenario turn leaves this out.
+   */
+  metering?: Record<string, number>;
   /** Which backend answered — `DeepLeo` is the reasoning pipeline. */
   contentOrigin?: string;
   /** Server-side turn count for this conversation. */
@@ -312,6 +371,9 @@ export class CopilotSession {
     return new Promise<TurnResult>((resolve, reject) => {
       let deltaText = "";
       let snapshotText = "";
+      // Any answer text in the update frames. The final item's own text does not count:
+      // a dead route carries its apology there and nowhere else.
+      let streamedContent = false;
       let handshakeDone = false;
       let settled = false;
       const result: TurnResult = { text: "" };
@@ -328,7 +390,7 @@ export class CopilotSession {
         // either can be the more complete one depending on where the turn ended.
         // Passed through verbatim so its indentation and tool-call fences are never touched.
         const raw = deltaText.length >= snapshotText.length ? deltaText : snapshotText;
-        const refusal = refusalOf(result, raw);
+        const refusal = refusalOf(result, raw, streamedContent);
         if (refusal) {
           reject(refusal);
           return;
@@ -382,6 +444,7 @@ export class CopilotSession {
                     return;
                   }
                   deltaText += applied.delta;
+                  if (applied.delta || applied.snapshot) streamedContent = true;
                   if (applied.snapshot.length > snapshotText.length) snapshotText = applied.snapshot;
                 }
               }
@@ -502,12 +565,7 @@ export class CopilotSession {
       turn.onDelta?.(deltaChunk);
     }
 
-    if (argument?.throttling) {
-      result.throttle = {
-        current: argument.throttling.numUserMessagesInConversation,
-        max: argument.throttling.maxNumUserMessagesInConversation,
-      };
-    }
+    if (argument?.throttling) absorbThrottling(argument.throttling, result);
 
     for (const message of argument?.messages ?? []) {
       if (message?.author !== "bot") continue;
@@ -529,12 +587,7 @@ export class CopilotSession {
     if (!item) return;
     if (typeof item.result?.value === "string") result.resultValue = item.result.value;
     if (typeof item.result?.errorCode === "string") result.errorCode = item.result.errorCode;
-    if (item.throttling) {
-      result.throttle = {
-        current: item.throttling.numUserMessagesInConversation,
-        max: item.throttling.maxNumUserMessagesInConversation,
-      };
-    }
+    if (item.throttling) absorbThrottling(item.throttling, result);
     for (const message of item.messages ?? []) {
       if (message?.author !== "bot") continue;
       if (message.messageType) {
@@ -602,6 +655,22 @@ export function describeConnection(url: string): Omit<SentFrame, "argument"> {
   return { host: parsed.host, path: parsed.pathname, params };
 }
 
+/** The quota a `throttling` object reports, and the allowances when it has `metering`. */
+function absorbThrottling(throttling: any, result: TurnResult): void {
+  result.throttle = {
+    current: throttling.numUserMessagesInConversation,
+    max: throttling.maxNumUserMessagesInConversation,
+  };
+  const metering = throttling.metering;
+  if (!metering || typeof metering !== "object") return;
+  const remaining: Record<string, number> = {};
+  for (const [key, value] of Object.entries(metering)) {
+    const allowance = (value as { remainingAllowance?: unknown } | null)?.remainingAllowance;
+    if (typeof allowance === "number" && Number.isFinite(allowance)) remaining[key] = allowance;
+  }
+  if (Object.keys(remaining).length > 0) result.metering = remaining;
+}
+
 /** What the chat frame carries from the caller: the prompt and its uploaded images. */
 interface OutgoingMessage {
   text: string;
@@ -612,9 +681,12 @@ interface OutgoingMessage {
  * M365's own refusal, when that is what arrived instead of an answer. Its text reads
  * like a reply, so returned as one it would end opencode's loop on an apology.
  */
-function refusalOf(result: TurnResult, text: string): Error | undefined {
+function refusalOf(result: TurnResult, text: string, streamedContent: boolean): Error | undefined {
   const detail = [result.errorCode, text.trim()].filter(Boolean).join(": ") || result.resultValue || "no reason given";
   if (result.resultValue === "Throttled") return new M365ThrottledError(detail);
+  if (result.resultValue === "OutOfCredits") return new PriorityAccessExhaustedError(text.trim());
+  if (result.errorCode === "InvalidCopilotLicense") return new PremiumLicenceRequiredError(text.trim());
+  if (result.resultValue === "InternalError" && !streamedContent) return new EmptyInternalError(detail);
   if (result.resultValue && result.resultValue !== "Success") return new M365UnavailableError(detail);
   // A tone that is registered but dead answers with a canned apology from here.
   if (result.contentOrigin === "BotConnection") return new M365UnavailableError(`registered but dead (BotConnection): ${detail}`);

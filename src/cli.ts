@@ -216,6 +216,7 @@ async function doServe(args: string[]): Promise<void> {
   console.log(`  completions: ${proxy.url}/v1/chat/completions`);
   console.log(`  web search:  ${current.webSearch ? "on" : "off — Copilot is not offered Bing on coding turns"}`);
   console.log(`  work data:   ${describeWorkIq(current.workIq)}`);
+  console.log(`  MCP tools:   ${current.mcpProxy ? "on — Copilot can search and call your MCP tools" : "off — Copilot is not shown your MCP tools"}`);
   console.log(`  page:        ${page ? page.link : "off — add --monitor to see every turn"}`);
   console.log("\nLoopback-only. Every request must send `Authorization: Bearer <key>`;");
   console.log("browser origins and CORS are refused.");
@@ -282,6 +283,7 @@ async function doDoctor(args: string[]): Promise<void> {
   const described = settings.describe();
   console.log(`  ..    work data (Work IQ) — ${describeWorkIq(described.workIq.value)}${sourceNote(described.workIq)}`);
   console.log(`  ..    Bing web search — ${described.webSearch.value ? "on" : "off"}${sourceNote(described.webSearch)}`);
+  console.log(`  ..    MCP tool search — ${described.mcpProxy.value ? "on" : "off"}${sourceNote(described.mcpProxy)}`);
   console.log(`  ..    allowed addresses — ${ALLOWED_HOSTS.auth} (sign-in), ${ALLOWED_HOSTS.chat} (Copilot)`);
 
   console.log("\nProxy");

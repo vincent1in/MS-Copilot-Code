@@ -14,6 +14,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { buildToolPrompt, parseToolCalls, renderToolCall, type ParsedToolCall, type ToolDef } from "./fenced.js";
+import { stripCodeModeSection } from "./codemode.js";
 import type { TurnResult } from "./session.js";
 
 
@@ -54,6 +55,8 @@ export const ChatCompletionRequest = z.object({
   tools: z.array(Tool).optional(),
   tool_choice: z.any().optional(),
   stream: z.boolean().optional(),
+  // `include_usage` asks for a final usage chunk; opencode sets it by default.
+  stream_options: z.object({ include_usage: z.boolean().optional() }).passthrough().optional(),
   // Accepted and ignored: M365 exposes no sampling controls.
   temperature: z.number().optional(),
   top_p: z.number().optional(),
@@ -217,7 +220,7 @@ export function condenseSystemPrompt(
     // opencode 2's Code Mode section says the listed tools only work inside `execute`.
     // Lean mode removes `execute`, so the section told the model its tools were unusable.
     if (!toolNames.has("execute")) {
-      text = text.replace(/^# Code Mode\n[\s\S]*?(?=^# |^Skills provide |^<[a-z_]+>|(?![\s\S]))/m, "");
+      text = stripCodeModeSection(text);
       text = dropLines(text, /`execute`/);
     }
     if (!toolNames.has("skill")) text = dropLines(text, /^Skills provide |\bskill tool\b|invoke a skill directly/);
@@ -332,6 +335,19 @@ export interface PromptOptions {
   /** How the tool block is worded; see `toolRouteFor`. */
   framing?: "default" | "relay";
   sandbox?: string;
+  /**
+   * Tools a past call in the history may name, when that is more than this turn
+   * offers: a tool the lean trim dropped, or `execute`, which the mcp proxy emits but
+   * never offers.
+   * Defaults to the turn's own tools.
+   */
+  historyTools?: readonly ToolDef[];
+  /**
+   * Render a past call as the fence the model wrote, when the default rendering would
+   * not be it: the proxy turns an `mcp` block into an `execute` call, and the history
+   * has to show the `mcp` block again. Undefined falls back to the default.
+   */
+  renderCall?: (name: string, rawArguments: string) => string | undefined;
 }
 
 /**
@@ -399,7 +415,12 @@ export function buildTurnPrompt(
       // answer calls nobody made.
       const text = contentOf(message);
       if (text) parts.push(text);
-      for (const call of message.tool_calls ?? []) parts.push(renderToolCall(call.function.name, call.function.arguments, tools));
+      for (const call of message.tool_calls ?? []) {
+        parts.push(
+          options.renderCall?.(call.function.name, call.function.arguments) ??
+            renderToolCall(call.function.name, call.function.arguments, options.historyTools ?? tools),
+        );
+      }
       continue;
     }
 
@@ -472,6 +493,10 @@ export interface CompletionOptions {
   model: string;
   tools: readonly ToolDef[];
   allowMultiple?: boolean;
+  /** Calls already decided by the proxy, sent as they are instead of parsing the reply. */
+  toolCalls?: readonly ParsedToolCall[];
+  /** The estimated size of the context opencode sent; see `estimatePromptTokens`. */
+  promptTokens?: number;
 }
 
 export interface ChatCompletion {
@@ -492,11 +517,17 @@ export interface ChatCompletion {
 }
 
 export function buildCompletion(result: TurnResult, options: CompletionOptions): ChatCompletion {
-  const { toolCalls, text } = parseToolCalls(result.text, options.tools, {
-    allowMultiple: options.allowMultiple ?? false,
-  });
+  const { toolCalls, text } = options.toolCalls
+    ? { toolCalls: options.toolCalls, text: "" }
+    : parseToolCalls(result.text, options.tools, { allowMultiple: options.allowMultiple ?? false });
 
   const hasCalls = toolCalls.length > 0;
+  const openAiCalls = hasCalls ? toolCalls.map(toOpenAiToolCall) : undefined;
+  const content = hasCalls ? null : text;
+  const estimate =
+    options.promptTokens === undefined
+      ? undefined
+      : { promptTokens: options.promptTokens, completionTokens: estimateCompletionTokens(content, openAiCalls) };
   return {
     id: `chatcmpl-${randomUUID()}`,
     object: "chat.completion",
@@ -507,13 +538,13 @@ export function buildCompletion(result: TurnResult, options: CompletionOptions):
         index: 0,
         message: {
           role: "assistant",
-          content: hasCalls ? null : text,
-          ...(hasCalls ? { tool_calls: toolCalls.map(toOpenAiToolCall) } : {}),
+          content,
+          ...(openAiCalls ? { tool_calls: openAiCalls } : {}),
         },
         finish_reason: hasCalls ? "tool_calls" : "stop",
       },
     ],
-    usage: buildUsage(result),
+    usage: buildUsage(result, estimate),
   };
 }
 
@@ -525,20 +556,72 @@ export function toOpenAiToolCall(call: ParsedToolCall) {
   };
 }
 
+// --- token estimates ------------------------------------------------------------
+
+/**
+ * Tokens charged for one image part. Its base64 is not text the model reads, so
+ * counting its characters would swamp the estimate; 85 is OpenAI's low-detail image
+ * cost, a small fixed amount that keeps an image visible in the meter.
+ */
+export const IMAGE_PART_TOKENS = 85;
+
+/** About four characters per token, rounded up. Empty text is 0. */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+type OpenAiToolCall = { function: { name: string; arguments: string } };
+
+/** The characters of some tool calls: each name and its JSON arguments. */
+function toolCallText(calls: readonly OpenAiToolCall[] | undefined): string {
+  return (calls ?? []).map((call) => call.function.name + call.function.arguments).join("");
+}
+
+/**
+ * The estimated size of the whole context opencode sent for a request: every
+ * message's text and tool calls, plus the tool definitions. Not the delta M365
+ * received — opencode's context meter wants the size of the context it holds.
+ * Image parts count `IMAGE_PART_TOKENS` each.
+ */
+export function estimatePromptTokens(messages: readonly ChatMessage[], tools: readonly unknown[] = []): number {
+  let text = "";
+  let images = 0;
+  for (const message of messages) {
+    text += contentOf(message) + toolCallText(message.tool_calls);
+    if (Array.isArray(message.content)) images += message.content.filter((part) => part.type === "image_url").length;
+  }
+  for (const tool of tools) text += JSON.stringify(tool);
+  return estimateTokens(text) + images * IMAGE_PART_TOKENS;
+}
+
+/** The estimated size of a reply: its text, or the calls' names and arguments. */
+export function estimateCompletionTokens(content: string | null, toolCalls?: readonly OpenAiToolCall[]): number {
+  return estimateTokens((content ?? "") + toolCallText(toolCalls));
+}
+
+export interface TokenEstimate {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 /**
  * Usage, plus M365-specific extensions.
  *
- * M365 never reports token counts, so the standard fields are zero. The extensions
- * carry what it *does* report: the per-conversation message quota — the closest thing
- * to context-window utilisation available — and the classifier score that rises
- * before the Disengaged filter fires. Clients that ignore unknown fields are fine.
+ * M365 never reports token counts. Given an estimate, the standard fields carry it
+ * (marked `x_m365_tokens_estimated`) so opencode's context meter works; without one
+ * they are zero. The extensions carry what M365 *does* report: the per-conversation
+ * message quota and the classifier score that rises before the Disengaged filter
+ * fires. Clients that ignore unknown fields are fine.
  */
-export function buildUsage(result: TurnResult) {
+export function buildUsage(result: TurnResult, estimate?: TokenEstimate) {
+  const prompt = estimate?.promptTokens ?? 0;
+  const completion = estimate?.completionTokens ?? 0;
   const usage: Record<string, any> = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
   };
+  if (estimate) usage.x_m365_tokens_estimated = true;
 
   if (result.throttle) {
     const { current, max } = result.throttle;
@@ -583,6 +666,16 @@ export function streamChunk(id: string, model: string, delta: ChunkDelta): strin
       },
     ],
   };
+  return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+/**
+ * The usage chunk that closes a stream when the client asked for `include_usage`:
+ * no choices, only `usage`, after the finish reason — OpenAI's shape, and what
+ * opencode's openai-chat protocol reads.
+ */
+export function streamUsageChunk(id: string, model: string, usage: Record<string, unknown>): string {
+  const payload = { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [], usage };
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
 

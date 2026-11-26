@@ -15,6 +15,7 @@ import { createAppController } from "./monitor/app.js";
 import { launchPage, type LaunchedPage } from "./monitor/launch.js";
 import { createMonitor } from "./monitor/monitor.js";
 import { DEFAULT_MODEL } from "./models.js";
+import { remoteMetrics, type MetricsSource, type SessionMetricsStore } from "./metrics.js";
 import { startServer } from "./server.js";
 import { createSettingsStore, type SettingsStore } from "./settings.js";
 import { gatewayCommand } from "./paths.js";
@@ -29,6 +30,17 @@ export interface M365Runtime {
   options: PluginOptions;
   /** The settings in force (see settings.ts); the plugin re-reads them as it goes. */
   settings: SettingsStore;
+  /**
+   * The in-process proxy's per-session metrics. Absent when attached to an external
+   * proxy (`baseUrl`): that one keeps its own, out of this process's reach.
+   */
+  metrics?: SessionMetricsStore;
+  /**
+   * An external proxy's metrics, read from it over HTTP (on this machine: `baseUrl` is
+   * loopback only). Set only when attached with `baseUrl`, so the TUI status works with
+   * `opencode-m365 serve` too.
+   */
+  remoteMetrics?: MetricsSource;
   /** Stops the proxy and its page, if this runtime is the one that started them. */
   close(): Promise<void>;
 }
@@ -59,7 +71,8 @@ export async function startRuntime(rawOptions?: Record<string, unknown>, deps: {
         `baseUrl is set but no proxy secret is: pass the key ${gatewayCommand("serve")} printed as the \`apiKey\` plugin option, or set M365_PROXY_KEY`,
       );
     }
-    return { baseUrl: options.baseUrl, apiKey: apiKey ?? "missing-proxy-secret", options, settings, close: async () => {} };
+    const key = apiKey ?? "missing-proxy-secret";
+    return { baseUrl: options.baseUrl, apiKey: key, options, settings, remoteMetrics: remoteMetrics(options.baseUrl, key), close: async () => {} };
   }
 
   const tokens = createTokenClient();
@@ -96,6 +109,7 @@ export async function startRuntime(rawOptions?: Record<string, unknown>, deps: {
     apiKey: proxy.apiKey,
     options,
     settings,
+    metrics: proxy.metrics,
     close: async () => {
       await page?.close();
       await proxy.close();

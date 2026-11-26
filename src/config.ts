@@ -320,6 +320,7 @@ const OUR_OPTION_KEYS: ReadonlySet<string> = new Set<string>([
   "webSearch",
   "workIq",
   "monitor",
+  "mcpProxy",
   "baseUrl",
   "apiKey",
 ]);
