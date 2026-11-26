@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { ToolDef } from "./fenced.js";
 import {
@@ -7,9 +8,14 @@ import {
   buildCompletion,
   buildTurnPrompt,
   buildUsage,
+  estimateCompletionTokens,
+  estimatePromptTokens,
+  estimateTokens,
   generateTitle,
+  IMAGE_PART_TOKENS,
   streamChunk,
   streamDone,
+  streamUsageChunk,
 } from "./translate.js";
 
 const bashTool: ToolDef = {
@@ -245,6 +251,15 @@ describe("condensing the harness system prompt", () => {
     expect(condensed).toContain("Working directory: /tmp/w");
   });
 
+  it("drops the whole Code Mode catalogue, even past a column-0 '# ' line in a doc comment", () => {
+    const section = readFileSync(new URL("../test/fixtures/opencode2-codemode.txt", import.meta.url), "utf8");
+    const prompt = `You are opencode.\n\n# Your Model\n- Model ID: quick\n${section}\n<env>\n  Working directory: /tmp/w\n</env>`;
+    const condensed = condenseSystemPrompt(prompt, leanFive);
+    expect(condensed).not.toMatch(/Code Mode|tools\.|Steps to reproduce|Post a message to a Slack channel/);
+    expect(condensed).toContain("# Your Model");
+    expect(condensed).toContain("Working directory: /tmp/w");
+  });
+
   it("drops the skills paragraph along with its catalogue", () => {
     expect(condenseSystemPrompt(opencode2Prompt, leanFive)).not.toMatch(/skill/i);
   });
@@ -475,6 +490,98 @@ describe("usage reporting", () => {
   });
 });
 
+describe("token estimates", () => {
+  it("counts about four characters per token, rounding up", () => {
+    expect(estimateTokens("")).toBe(0);
+    expect(estimateTokens("a")).toBe(1);
+    expect(estimateTokens("abcd")).toBe(1);
+    expect(estimateTokens("abcde")).toBe(2);
+  });
+
+  it("sizes the whole context opencode sent: every message, plus the tool definitions", () => {
+    const messages = [system("s".repeat(40)), user("u".repeat(40))];
+    const bare = estimatePromptTokens(messages);
+    expect(bare).toBe(20);
+    const withTools = estimatePromptTokens(messages, [bashTool]);
+    expect(withTools).toBe(bare + estimateTokens(JSON.stringify(bashTool)));
+  });
+
+  it("counts an assistant's tool calls and a tool result", () => {
+    const call = { id: "c1", type: "function" as const, function: { name: "bash", arguments: '{"command":"ls"}' } };
+    const messages = [
+      { role: "assistant", content: null, tool_calls: [call] },
+      { role: "tool", tool_call_id: "c1", content: "file.txt" },
+    ];
+    expect(estimatePromptTokens(messages)).toBe(estimateTokens("bash" + '{"command":"ls"}' + "file.txt"));
+  });
+
+  it("counts an image part as a fixed amount, not its base64 length", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "abcd" },
+          { type: "image_url", image_url: { url: `data:image/png;base64,${"A".repeat(10_000)}` } },
+        ],
+      },
+    ];
+    expect(estimatePromptTokens(messages)).toBe(1 + IMAGE_PART_TOKENS);
+  });
+
+  it("is zero for an empty context", () => {
+    expect(estimatePromptTokens([], [])).toBe(0);
+    expect(estimatePromptTokens([{ role: "user", content: "" }])).toBe(0);
+  });
+
+  it("sizes the reply from its text, or from the call arguments when it is a call", () => {
+    expect(estimateCompletionTokens("abcdefgh")).toBe(2);
+    expect(estimateCompletionTokens(null)).toBe(0);
+    const call = { id: "c1", type: "function" as const, function: { name: "bash", arguments: '{"command":"ls"}' } };
+    expect(estimateCompletionTokens(null, [call])).toBe(estimateTokens("bash" + '{"command":"ls"}'));
+  });
+});
+
+describe("estimated usage", () => {
+  it("fills the standard fields from the estimate and marks them as estimated", () => {
+    const usage = buildUsage({ text: "", throttle: { current: 4, max: 600 } }, { promptTokens: 120, completionTokens: 30 });
+    expect(usage).toMatchObject({
+      prompt_tokens: 120,
+      completion_tokens: 30,
+      total_tokens: 150,
+      x_m365_tokens_estimated: true,
+      x_m365_conversation_messages: 4,
+    });
+  });
+
+  it("does not claim an estimate when there is none", () => {
+    expect(buildUsage({ text: "" }).x_m365_tokens_estimated).toBeUndefined();
+  });
+
+  it("estimates a completion's tokens from the context it was given and the reply it returns", () => {
+    const completion = buildCompletion({ text: "abcdefgh" }, { model: "m", tools: [], promptTokens: 50 });
+    expect(completion.usage).toMatchObject({ prompt_tokens: 50, completion_tokens: 2, total_tokens: 52, x_m365_tokens_estimated: true });
+  });
+
+  it("estimates a tool-call completion from the call it returns", () => {
+    const completion = buildCompletion({ text: "```bash\nls\n```" }, { model: "m", tools: [bashTool], promptTokens: 10 });
+    const call = completion.choices[0]!.message.tool_calls![0]!;
+    expect(completion.usage.completion_tokens).toBe(estimateTokens(call.function.name + call.function.arguments));
+  });
+
+  it("streams usage as its own chunk with no choices, the way OpenAI does for include_usage", () => {
+    const frame = streamUsageChunk("id1", "m", { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 });
+    expect(frame.startsWith("data: ")).toBe(true);
+    const payload = JSON.parse(frame.slice("data: ".length));
+    expect(payload).toMatchObject({ id: "id1", object: "chat.completion.chunk", model: "m", choices: [] });
+    expect(payload.usage.total_tokens).toBe(4);
+  });
+
+  it("accepts stream_options from the request", () => {
+    const parsed = ChatCompletionRequest.parse({ messages: [user("hi")], stream: true, stream_options: { include_usage: true } });
+    expect(parsed.stream_options?.include_usage).toBe(true);
+  });
+});
+
 describe("local title generation", () => {
   it("produces a short title without contacting M365", () => {
     const title = generateTitle([user("Please refactor the authentication middleware to use async handlers")]);
@@ -535,6 +642,32 @@ describe("replaying history into a fresh conversation", () => {
     const prompt = buildTurnPrompt(messages, [bashTool], 0);
     expect(prompt).toContain("```bash\nls -la\n```");
     expect(prompt.indexOf("```bash\nls -la")).toBeLessThan(prompt.indexOf("README.md"));
+  });
+
+  it("renders a past call to a tool the turn no longer offers, from the history tools", () => {
+    // A tool the request offers but this turn's tool block leaves out.
+    const issueTool: ToolDef = {
+      type: "function",
+      function: {
+        name: "github_create_issue",
+        description: "Create an issue",
+        parameters: { type: "object", properties: { repo: { type: "string" }, title: { type: "string" } } },
+      },
+    };
+    const messages = [
+      user("file it"),
+      {
+        role: "assistant" as const,
+        content: null,
+        tool_calls: [
+          { id: "c2", type: "function" as const, function: { name: "github_create_issue", arguments: '{"repo":"a/b","title":"Bug"}' } },
+        ],
+      },
+      { role: "tool" as const, tool_call_id: "c2", content: "#1" },
+    ];
+    const prompt = buildTurnPrompt(messages, [bashTool], 0, { historyTools: [bashTool, issueTool] });
+    expect(prompt).toContain("```github_create_issue\nrepo: a/b\ntitle: Bug\n```");
+    expect(prompt).not.toContain('"repo":"a/b"');
   });
 });
 

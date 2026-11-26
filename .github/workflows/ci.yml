@@ -37,6 +37,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Lint the shell scripts, the installer among them
+        run: shellcheck -s sh install.sh start.sh scripts/release.sh scripts/sealed-network/run.sh
+
       - name: Install from the lockfile, no lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 

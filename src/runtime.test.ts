@@ -2,8 +2,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { botMessage, completion, startStubCopilot, throttling, type StubServer } from "../test/stub-copilot.js";
 import { listMonitorLinks } from "./monitor/links.js";
 import { startRuntime as startRuntimeWith, type M365Runtime } from "./runtime.js";
+import { SESSION_ID_HEADER, startServer, type ProxyHandle } from "./server.js";
 
 /** Every runtime here reads a private, empty settings file, never the real one. */
 const settingsFile = () => join(mkdtempSync(join(tmpdir(), "m365-runtime-")), "settings.json");
@@ -77,5 +79,30 @@ describe("settings in the plugin", () => {
     await runtime.close();
     runtime = undefined;
     expect(listMonitorLinks().length).toBe(before);
+  });
+});
+
+describe("metrics when attached to an external proxy", () => {
+  let stub: StubServer | undefined;
+  let proxy: ProxyHandle | undefined;
+  afterEach(async () => {
+    await proxy?.close();
+    await stub?.close();
+    proxy = stub = undefined;
+  });
+
+  it("are read from that proxy, so the TUI status works with `serve` too", async () => {
+    stub = await startStubCopilot({ respond: () => [throttling(9, 600), botMessage("ok"), completion()] });
+    const b64 = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    proxy = await startServer({ getToken: async () => `${b64({ alg: "none" })}.${b64({ oid: "o", tid: "t" })}.sig`, endpoint: stub.origin });
+    await fetch(`${proxy.url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${proxy.apiKey}`, "Content-Type": "application/json", [SESSION_ID_HEADER]: "ses_e" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    runtime = await startRuntime({ baseUrl: `${proxy.url}/v1`, apiKey: proxy.apiKey });
+    expect(runtime.metrics).toBeUndefined();
+    expect(await runtime.remoteMetrics?.get("ses_e")).toMatchObject({ sessionID: "ses_e", conversation: { used: 9, max: 600 } });
   });
 });

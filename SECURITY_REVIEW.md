@@ -269,6 +269,48 @@ The verdict over the whole run:
 
 This is the fourth line of defence. It sits beneath the code's two-host allowlist and listener checks, the Node recorder and the system-call trace.
 
+## Addendum: upstream 2.4, one-line installers and a Release button (2.5.0)
+
+2026-11-26, by Claude, on branch `updates-2.5`. You asked whether there were updates and for
+an easier download. You chose upstream's fixes with GPT-6.2 Sol, the package updates, the
+quota line in OpenCode, MCP tool search, and a Release button with one-line install
+commands, with nothing that spends Copilot credits.
+
+| # | Topic | Decision and why | Enforced by |
+|---|---|---|---|
+| A11 | **Upstream 2.3.0 and 2.4.0 merged** (`0ab9399`, 18 commits on top of `v2.2.1`). | Read as a diff, then merged, conflicts resolved by hand. Kept: GPT-6.2 Sol, the model-list dedupe and aliases, the fix for a fence opened at the end of a sentence, estimated token usage, the TUI status line and its metrics store, and the MCP tool search. Claude's tool turns move to the relay framing, as upstream routes agent-less Claude. | The suite (946 tests), and A12–A14 |
+| A12 | **Nothing that costs extra.** Upstream 2.4 added eight models that need a premium licence, M365's paid scenario or Copilot credits, and the plumbing to send `OfficeWebPaidCopilot` with `licenseType=Premium`. | None of it is merged. The eight are not listed, their aliases are gone, and a request naming one is answered by the default model. `buildUrl` sends the included scenario and no `licenseType` for every model id, the eight included. Upstream's learned agent route and `M365_FORCE_AGENT` are left out too: this fork attaches no agent. | `src/models.test.ts` ("models that need a premium licence or spend Copilot credits"); `src/server.test.ts` ("sends %s on the included scenario", one test per listed and per excluded id, tool turn and plain chat); `src/session.test.ts` |
+| A13 | **MCP tool search, opt-in.** opencode 2 lists MCP tools only in a Code Mode catalogue in the system prompt, callable as JavaScript through `execute`. | Off (the default), the catalogue is stripped and `execute` is never offered, so Copilot sees no MCP tool. On (Settings page, `mcpProxy`, `M365_MCP_PROXY=1`), Copilot gets one `mcp` tool. A search is answered in the gateway from the catalogue, sending the matching tools' signatures and descriptions to `substrate.office.com`. A call becomes an `execute` call for OpenCode to run, under OpenCode's own permission rules. The only code the gateway writes is `return await tools.<path>(<JSON>);` or `return await search(<JSON string>);`. A path must be in the catalogue or, for a partial catalogue, match `tools` followed by identifiers or quoted names with no quotes or backslashes; arguments go through `JSON.stringify`. Each search and its answer show on the page as their own messages to Copilot, with a note in Checks. | `src/server.test.ts` ("the mcp proxy over opencode 2's Code Mode catalogue"); `src/mcp.test.ts`; `src/codemode.test.ts`; `src/docs.test.ts` |
+| A14 | **The status line and its figures.** | Kept in memory per session (the 200 most recent), never written or sent anywhere. The TUI reads them in-process over OpenCode's RPC. Attached to an external proxy, which must be on this machine, it reads `GET /v1/m365/metrics/<id>` behind the proxy's bearer key, `Host` check and `Origin` refusal. The TUI loads OpenCode's own Solid runtime by fixed name; nothing is fetched. | `src/server.test.ts` ("serves a session's metrics…", "refuses the metrics route to a web page or a rebound host name"); `src/metrics.test.ts`; `src/tui-entry.test.ts` |
+| A15 | **One-line installers.** | `install.sh` and `install.ps1` download two files from this repository's latest release on `github.com` (served from `release-assets.githubusercontent.com`): the zip and its `.sha256`. They check the zip's SHA-256 and then every file against `SHA256SUMS`, and install nothing on a mismatch. They write only the gateway's folder, refuse to replace a folder that isn't a copy of the gateway, never edit OpenCode's config, and run no installer. With `--zip`, they download nothing. Settings and sign-in live outside the folder, so an update keeps them. | `test/install-script.test.ts` (a fake release: install, update, a tampered zip, a tampered file, a foreign folder, the only addresses used); `shellcheck` in CI; the Release workflow's own install runs |
+| A16 | **The Release button.** | `.github/workflows/release.yml` runs only when started by hand, only from `main`, one run at a time, with actions pinned to the same SHAs as CI. Only the publishing job can write, and the token reaches only the steps that call `gh`. It typechecks, builds and tests in a network namespace as CI does, builds the zip, installs it with `install.sh --zip` with no network, refuses a version already released, and creates tag `v<version>` at the commit it built. Then it runs the README's install commands against the new release on Linux, macOS and Windows. | `release.yml`; [AGENTS.md](AGENTS.md) rules 11 and 12 |
+
+### Checks on 2.5.0
+
+| Check | Result |
+|---|---|
+| Upstream's new code (`mcp.ts`, `codemode.ts`, `metrics.ts`, `tui.ts`, `tui-status.ts`, and the changes to the rest) | Every file read. No new address, no `child_process`, `eval`, `new Function` or `vm`. The only new dynamic imports are OpenCode's `@opentui/solid` and `solid-js`, by fixed name. No new environment variable apart from `M365_MCP_PROXY`, read through the settings store. |
+| Addresses in the build | `dist/`'s address literals are identical to 2.4.0's. |
+| Package updates | `@azure/msal-node` 7.2.3 with `msal-common` 16.17.0, `ws` 8.23.0, `playwright` and `playwright-core` 1.65.1, and `@opencode/plugin` 2.4.2 (types only, not shipped). Each old and new tarball was downloaded and diffed. MSAL's changes are hardening: auth-code state checks, region and authority-URL validation, and `cloud_instance_host_name` ignored unless asked for. `ws` caps pending automatic pongs. Playwright changes only its Chromium revision, which this gateway doesn't use (it signs in with your installed Edge or Chrome). None adds an address. |
+| Lockfile | 375 entries, all `registry.npmjs.org` with `sha512`. No package name added or removed. A fresh `npm ci --ignore-scripts` installs 309 packages on Linux, identical to the tree everything was built and tested with. The 3 more than 2.4.0's 306 are dev-only platform binaries for the bundler (`@rolldown/binding-linux-x64-musl`, `lightningcss-linux-x64-musl`). |
+| Registry signatures | All 309 installed versions carry a valid npm registry ECDSA signature over `name@version:integrity`, checked against the registry's published keys, and the registry's integrity equals the lockfile's. 141 also carry provenance attestations, not verified here. `npm audit signatures` itself could not run: the sandbox refused its Sigstore download. **Run it locally.** |
+| Known vulnerabilities | `npm audit`: 0 runtime, 0 overall. |
+| Tests | Typecheck, build and 946 tests in 38 files, in a network namespace with only loopback and `net-guard` blocking: 51 Node processes and threads guarded, **0** non-loopback attempts apart from the guard's 5 self-test probes. |
+| Reproducible zip | `scripts/release.sh` twice from commit `9c81f1b` (2.5.0's code; later commits change only documentation) gave the same zip, SHA-256 `10b29f74ffac5d038c35e1b7b71e5c80429e7e25dd2c1647a6a7de9fea9dfc06`. Every file matches `SHA256SUMS`. `dist/`, rebuilt offline from the zip's own source and lockfile, is byte-identical, and so are `playwright` and `playwright-core` from a fresh `npm ci`. |
+| Four ways, from the unzipped 2.5.0 | `scripts/sealed-network/run.sh`, run from that zip's folder, gave the same table as 2.4.0. Signed out, every command, the page with Connect, and the plugin inside OpenCode sent nothing. A signed-in test message reached `substrate.office.com` only, or `login.microsoftonline.com` only with an expired token. The Chrome sign-in window reached `login.microsoftonline.com` only. Every listener was on `127.0.0.1`, and every inbound probe was refused. Verdict: nothing outside the two hosts. |
+| Installers | `install.sh` on Linux against the real 2.5.0 zip, by hand: install, update in place, a tampered zip and a tampered file inside, refused with nothing installed and no temporary files left. `install.ps1` has **not** been run here: this sandbox has no PowerShell and refused downloading one. It was reviewed line by line instead (case-insensitive names, quoting to native commands, literal paths, one-drive moves). The Release workflow runs it on Windows after the first publish. |
+
+**Residual:**
+
+1. `install.ps1` runs for the first time in the Release workflow. If that run fails on
+   Windows, the release is already published; delete it, fix the script, and release again.
+2. A checksum shows a download is intact and is what the release published. It can't vouch
+   for the release itself. Rebuild `dist/` from the zip's own source to check that.
+3. MCP tool search hasn't been measured against a live tenant. Turned on, it sends the
+   searched tools' names, descriptions and arguments, and their results, to Copilot.
+4. As before, nothing here has run against a live tenant, OpenCode's own traffic is outside
+   this review, and Edge's own background traffic hasn't been measured.
+
 ## Re-verify it yourself
 
 ```sh
@@ -298,21 +340,27 @@ node dist/cli.mjs doctor --browser
 sudo sh scripts/sealed-network/run.sh
 
 # A release zip: check it against its .sha256, then every file against SHA256SUMS.
-shasum -a 256 -c opencode-m365-copilot-2.4.0.zip.sha256
-unzip -q opencode-m365-copilot-2.4.0.zip && cd opencode-m365-copilot-2.4.0 && shasum -a 256 -c SHA256SUMS
+# (The install commands do both for you.)
+shasum -a 256 -c opencode-m365-copilot-2.5.0.zip.sha256
+unzip -q opencode-m365-copilot-2.5.0.zip && cd opencode-m365-copilot-2.5.0 && shasum -a 256 -c SHA256SUMS
 # Rebuild dist/ from the zip's own source and lockfile, in a copy, and compare:
 cp -R . ../rebuild && cd ../rebuild && npm ci --ignore-scripts && npm run build \
-  && diff -r dist ../opencode-m365-copilot-2.4.0/dist && echo "dist/ is identical"
+  && diff -r dist ../opencode-m365-copilot-2.5.0/dist && echo "dist/ is identical"
+
+# What the installers can reach: every address in them, and their tests.
+grep -noE 'https?://[^ "]+' install.sh install.ps1
+npx --no-install vitest run test/install-script.test.ts
 ```
 
 ## Taking upstream changes later
 
-Upstream history is kept, and the reviewed base is tagged `upstream-v2.2.1`:
+Upstream history is kept. The first reviewed base is tagged `upstream-v2.2.1`; 2.5.0
+merged upstream up to `0ab9399` (its v2.4.0):
 
 ```sh
 git remote add upstream https://github.com/chrischall/opencode-copilot-plugin.git
 git fetch upstream
-git diff upstream-v2.2.1 upstream/main -- src package.json package-lock.json .github tsdown.config.ts
+git diff 0ab9399 upstream/main -- src package.json package-lock.json .github tsdown.config.ts
 ```
 
 Review that diff against the [fork rules](AGENTS.md#fork-rules-safety-reviewed-fork--read-first) before merging, and re-run the checks above.

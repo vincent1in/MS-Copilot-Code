@@ -188,7 +188,7 @@ export function summarizeTurn(turn) {
   else if (turn.request?.session) meta.push(`session ${shortId(turn.request.session)}`);
   const end = turn.result || turn.error ? turn.lastAt : null;
   if (end && turn.request) meta.push(formatDuration(Date.parse(end) - Date.parse(turn.request.at)));
-  if (turn.attempts.length > 1) meta.push("asked twice");
+  if (turn.attempts.length > 1) meta.push(`${turn.attempts.length} messages to Copilot`);
   return { what, localOnly: false, flags, meta };
 }
 
@@ -247,6 +247,7 @@ const CHECK_LABELS = {
   tools: "Tool list",
   refusal: "Refusal",
   conversation: "Conversation",
+  mcp: "MCP tools",
 };
 
 const VERDICT_WORDS = { allowed: "Allowed", denied: "Refused", held: "Held", flagged: "Flagged", info: "Noted" };
@@ -297,6 +298,16 @@ const SETTING_GROUPS = [
         key: "webSearch",
         name: "Bing web search",
         help: "With it on, Copilot may turn parts of your code into Bing searches.",
+        options: [
+          [false, "Off (recommended)"],
+          [true, "On"],
+        ],
+      },
+      {
+        key: "mcpProxy",
+        name: "MCP tool search",
+        tag: "experimental",
+        help: "Lets Copilot find and use the MCP tools you added to OpenCode. When it searches, the gateway sends Copilot the names, descriptions and arguments of the tools that match, and their results come back like any other tool's. Off, Copilot is shown none of your MCP tools.",
         options: [
           [false, "Off (recommended)"],
           [true, "On"],
@@ -1226,8 +1237,11 @@ function boot() {
     return h(
       "section",
       { class: "entry" },
-      h("h3", null, send.nudge ? "Sent to Copilot: the follow-up" : "Sent to Copilot"),
+      h("h3", null, send.nudge ? "Sent to Copilot: the follow-up" : send.mcpAnswer ? "Sent to Copilot: the answer to its MCP search" : "Sent to Copilot"),
       send.nudge ? h("p", { class: "note" }, "Copilot said it could not act on the files, so the gateway asked once more in the same conversation.") : null,
+      send.mcpAnswer
+        ? h("p", { class: "note" }, "Copilot used the mcp tool, so the gateway answered from the list of MCP tools OpenCode gave it, in the same conversation.")
+        : null,
       h("p", { class: "note" }, `The exact text Copilot received, ${linesLabel(countLines(send.text))}.`),
       payload(`${turn.id}:s${attempt.n}`, send.text, { findings, copy: true }),
       h(

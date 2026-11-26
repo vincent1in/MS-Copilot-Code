@@ -1,10 +1,11 @@
+import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { botMessage, completion, delta, disengaged, startStubCopilot, streamItem, throttling, type StubServer } from "../test/stub-copilot.js";
 import { AuthRequiredError } from "./auth.js";
-import { DEFAULT_MODEL, LOCAL_TITLE_MODEL } from "./models.js";
+import { DEFAULT_MODEL, LOCAL_TITLE_MODEL, listModelIds } from "./models.js";
 import { opencodeWouldRetry } from "../test/opencode-retry.js";
-import { AUX_REQUEST_KIND_HEADER, SESSION_ID_HEADER, startServer, type ProxyHandle } from "./server.js";
+import { AUX_REQUEST_KIND_HEADER, SESSION_ID_HEADER, startServer, stripMcpCalls, type ProxyHandle } from "./server.js";
 
 function fakeToken(oid = "oid", tid = "tid"): string {
   const b64 = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -67,6 +68,25 @@ describe("service endpoints", () => {
     const body: any = await (await authedFetch(`${url}/v1/models`)).json();
     expect(body.object).toBe("list");
     expect(body.data.map((m: any) => m.id)).toContain(DEFAULT_MODEL);
+  });
+
+  it("lists canonical ids only, not the compatibility aliases", async () => {
+    const { url } = await start();
+    const body: any = await (await authedFetch(`${url}/v1/models`)).json();
+    const ids = body.data.map((m: any) => m.id);
+    expect(ids).toContain("m365-copilot");
+    for (const alias of ["auto", "claude", "gpt-5.4", "gpt-5.3", "gpt-5.2"]) expect(ids).not.toContain(alias);
+  });
+
+  it("lists none of upstream's paid, credit-billed or metered models", async () => {
+    const { url } = await start();
+    const body: any = await (await authedFetch(`${url}/v1/models`)).json();
+    const ids = body.data.map((m: any) => m.id);
+    for (const id of ["gpt-6-think-deeper", "gpt-6-astra", "gpt-6.2-astra", "claude-opus", "claude-opus-4.8", "claude-sonnet-5.5", "claude-sonnet-5", "claude-fable"]) {
+      expect(ids).not.toContain(id);
+    }
+    expect(ids).toContain("gpt-6.2-sol");
+    for (const alias of ["claude-opus-5.5", "claude-opus-4.5", "claude-sonnet-4.6", "claude-fable-5.1"]) expect(ids).not.toContain(alias);
   });
 
   it("404s an unknown path instead of hanging", async () => {
@@ -287,11 +307,131 @@ describe("chat completions", () => {
     expect(body.usage.x_m365_conversation_messages).toBe(3);
   });
 
+  it("estimates the context and reply tokens so opencode's context meter moves", async () => {
+    stub = await startStubCopilot({ respond: () => [botMessage("abcdefgh"), completion()] });
+    const { url } = await start();
+    const messages = [{ role: "user", content: "x".repeat(400) }];
+    const body: any = await (await post(url, { messages, tools: [bashTool] })).json();
+    expect(body.usage.x_m365_tokens_estimated).toBe(true);
+    // The whole context opencode sent, tool definitions included: not the delta M365 got.
+    expect(body.usage.prompt_tokens).toBe(100 + Math.ceil(JSON.stringify(bashTool).length / 4));
+    expect(body.usage.completion_tokens).toBe(2);
+    expect(body.usage.total_tokens).toBe(body.usage.prompt_tokens + 2);
+  });
+
   it("defaults the model when the client sends none", async () => {
     stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
     const { url } = await start();
     const body: any = await (await post(url, { messages: [{ role: "user", content: "hi" }] })).json();
     expect(body.model).toBe(DEFAULT_MODEL);
+  });
+});
+
+describe("per-session metrics", () => {
+  const postAs = (url: string, sessionId: string | undefined, body: unknown) =>
+    authedFetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(sessionId ? { [SESSION_ID_HEADER]: sessionId } : {}) },
+      body: JSON.stringify(body),
+    });
+
+  it("records the session's model, quota, context and turns", async () => {
+    stub = await startStubCopilot({ respond: () => [throttling(12, 600), botMessage("ok"), completion()] });
+    const { url } = await start();
+    const messages = [{ role: "user", content: "x".repeat(400) }];
+    expect((await postAs(url, "ses_a", { model: "m365/gpt-6.2-sol", messages })).status).toBe(200);
+    expect(proxy!.metrics.get("ses_a")).toMatchObject({
+      sessionID: "ses_a",
+      model: { id: "gpt-6.2-sol" },
+      conversation: { used: 12, max: 600 },
+      contextTokens: 100,
+      turns: 1,
+      creditTurns: 0,
+    });
+    // Allowances come only with paid-scenario turns, which this fork never sends.
+    expect(proxy!.metrics.get("ses_a")?.allowances).toBeUndefined();
+  });
+
+  it("counts no credit turns: no model here bills Copilot credits", async () => {
+    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
+    const { url } = await start();
+    await postAs(url, "ses_c", { messages: [{ role: "user", content: "hi" }] });
+    await postAs(url, "ses_c", {
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "again" },
+      ],
+    });
+    expect(proxy!.metrics.get("ses_c")).toMatchObject({ turns: 2, creditTurns: 0 });
+  });
+
+  it("records the streamed path too", async () => {
+    stub = await startStubCopilot({ respond: () => [throttling(5), delta("abcd"), streamItem("abcd"), completion()] });
+    const { url } = await start();
+    await (await postAs(url, "ses_s", { stream: true, messages: [{ role: "user", content: "hi" }] })).text();
+    expect(proxy!.metrics.get("ses_s")).toMatchObject({ turns: 1, conversation: { used: 5, max: 600 } });
+  });
+
+  it("keeps the last refusal, should M365 report a used-up allowance or a missing licence", async () => {
+    let refusal: "allowance" | "licence" = "allowance";
+    stub = await startStubCopilot({
+      respond: () =>
+        refusal === "allowance"
+          ? [{ type: 2, item: { messages: [], result: { value: "OutOfCredits", message: "You've used your available priority access for today.", creditScenario: "TotalTurn" } } }, completion()]
+          : [{ type: 2, item: { messages: [], result: { value: "ForbiddenRequest", errorCode: "InvalidCopilotLicense", message: "no licence" } } }, completion()],
+    });
+    const { url } = await start();
+    expect((await postAs(url, "ses_r", { messages: [{ role: "user", content: "hi" }] })).status).toBe(422);
+    expect(proxy!.metrics.get("ses_r")).toMatchObject({ turns: 0, lastRefusal: { reason: "allowance" } });
+    expect(proxy!.metrics.get("ses_r")?.lastRefusal?.message).toMatch(/daily priority-access allowance/);
+
+    refusal = "licence";
+    await postAs(url, "ses_r", { messages: [{ role: "user", content: "hi" }] });
+    expect(proxy!.metrics.get("ses_r")?.lastRefusal?.reason).toBe("licence");
+  });
+
+  it("records nothing for a request that names no session, or for the local titler", async () => {
+    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
+    const { url } = await start();
+    await postAs(url, undefined, { messages: [{ role: "user", content: "hi" }] });
+    await postAs(url, "ses_t", { model: LOCAL_TITLE_MODEL, messages: [{ role: "user", content: "hi" }] });
+    expect(proxy!.metrics.size).toBe(0);
+  });
+
+  it("uses a store the caller hands in", async () => {
+    const { SessionMetricsStore } = await import("./metrics.js");
+    const metrics = new SessionMetricsStore();
+    stub = await startStubCopilot({ respond: () => [botMessage("ok"), completion()] });
+    const { url } = await start({ metrics });
+    await postAs(url, "ses_x", { messages: [{ role: "user", content: "hi" }] });
+    expect(proxy!.metrics).toBe(metrics);
+    expect(metrics.get("ses_x")?.turns).toBe(1);
+  });
+
+  it("serves a session's metrics at /v1/m365/metrics/<id>, behind the secret", async () => {
+    // What a plugin attached to this proxy with `baseUrl` reads: the store is in
+    // this process, not in opencode's.
+    stub = await startStubCopilot({ respond: () => [throttling(7, 600), botMessage("ok"), completion()] });
+    const { url } = await start();
+    await postAs(url, "ses/odd id", { messages: [{ role: "user", content: "hi" }] });
+
+    const known = await authedFetch(`${url}/v1/m365/metrics/${encodeURIComponent("ses/odd id")}`);
+    expect(known.status).toBe(200);
+    expect(((await known.json()) as { metrics: unknown }).metrics).toMatchObject({ sessionID: "ses/odd id", turns: 1, conversation: { used: 7, max: 600 } });
+
+    const unknown = await authedFetch(`${url}/v1/m365/metrics/ses_nope`);
+    expect(await unknown.json()).toEqual({ metrics: null });
+
+    expect((await fetch(`${url}/v1/m365/metrics/ses_nope`)).status).toBe(401);
+  });
+
+  it("refuses the metrics route to a web page or a rebound host name, even with the secret", async () => {
+    const { url } = await start();
+    const path = "/v1/m365/metrics/ses_nope";
+    const auth = `Bearer ${proxy!.apiKey}`;
+    expect((await rawRequest(url, { path, headers: { Origin: "https://evil.example", Authorization: auth } })).status).toBe(403);
+    expect((await rawRequest(url, { path, headers: { Host: "evil.example", Authorization: auth } })).status).toBe(403);
   });
 });
 
@@ -654,6 +794,60 @@ describe("streaming", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
   });
 
+  const frames = (text: string) =>
+    text
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("data: ") && !frame.includes("[DONE]"))
+      .map((frame) => JSON.parse(frame.slice("data: ".length)));
+
+  it("ends with a usage chunk when the client asks for include_usage, as opencode does", async () => {
+    stub = await startStubCopilot({ respond: () => [throttling(5), delta("abcd"), streamItem("abcd"), completion()] });
+    const { url } = await start();
+    const text = await (
+      await post(url, {
+        stream: true,
+        stream_options: { include_usage: true },
+        messages: [{ role: "user", content: "y".repeat(40) }],
+      })
+    ).text();
+    const events = frames(text);
+    const last = events.at(-1);
+    expect(last.choices).toEqual([]);
+    expect(last.usage).toMatchObject({
+      prompt_tokens: 10,
+      completion_tokens: 1,
+      total_tokens: 11,
+      x_m365_tokens_estimated: true,
+      x_m365_conversation_messages: 5,
+    });
+    // The finish reason comes first, so opencode has closed the turn before usage lands.
+    expect(events.at(-2).choices[0].finish_reason).toBe("stop");
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("estimates a streamed tool call from its arguments", async () => {
+    stub = await startStubCopilot({ respond: () => [streamItem("```bash\nls\n```"), completion()] });
+    const { url } = await start();
+    const text = await (
+      await post(url, {
+        stream: true,
+        stream_options: { include_usage: true },
+        messages: [{ role: "user", content: "list" }],
+        tools: [bashTool],
+      })
+    ).text();
+    const events = frames(text);
+    const call = events.find((event) => event.choices?.[0]?.delta?.tool_calls).choices[0].delta.tool_calls[0];
+    expect(events.at(-1).usage.completion_tokens).toBe(Math.ceil((call.function.name + call.function.arguments).length / 4));
+  });
+
+  it("sends no usage chunk when the client did not ask for one", async () => {
+    stub = await startStubCopilot({ respond: () => [botMessage("hi"), completion()] });
+    const { url } = await start();
+    const text = await (await post(url, { stream: true, messages: [{ role: "user", content: "hi" }] })).text();
+    expect(frames(text).some((event) => event.usage)).toBe(false);
+  });
+
   it("buffers a tool turn, because fences can only be parsed once complete", async () => {
     stub = await startStubCopilot({
       respond: () => [delta("```bash\n"), delta("ls\n```"), streamItem("```bash\nls\n```"), completion()],
@@ -811,6 +1005,51 @@ describe("tool turns per tone", () => {
     expect(chatArg().message.text).toMatch(/guide me through this from my terminal/);
   });
 
+  it("sends a GPT-6.2 Sol tool turn agent-less, as a relay that names its sandbox", async () => {
+    stub = await startStubCopilot({ respond: () => [streamItem("```bash\nls\n```"), completion()] });
+    const { url } = await start();
+    await post(url, { model: "gpt-6.2-sol", messages: [{ role: "user", content: "list" }], tools: [bashTool] });
+    expect(chatArg().threadLevelGptId).toBeUndefined();
+    expect(chatArg().message.text).toMatch(/guide me through this from my terminal/);
+    expect(chatArg().message.text).toContain("bash_tool");
+  });
+
+  it("sends a Claude tool turn as a relay", async () => {
+    stub = await startStubCopilot({ respond: () => [streamItem("```bash\nls\n```"), completion()] });
+    const { url } = await start();
+    await post(url, { model: "claude-sonnet", messages: [{ role: "user", content: "list" }], tools: [bashTool] });
+    expect(chatArg().tone).toBe("Claude_Sonnet");
+    expect(chatArg().threadLevelGptId).toBeUndefined();
+    expect(chatArg().message.text).toMatch(/guide me through this from my terminal/);
+  });
+
+  // Every listed model, and every id upstream bills or gates, goes out on the included
+  // scenario with no licence type: this fork never sends M365's paid scenario.
+  const onTheWire = [
+    ...listModelIds().filter((id) => id !== LOCAL_TITLE_MODEL),
+    "claude-opus",
+    "claude-opus-4.8",
+    "claude-sonnet-5.5",
+    "claude-sonnet-5",
+    "claude-fable",
+    "gpt-6-think-deeper",
+    "gpt-6-astra",
+    "gpt-6.2-astra",
+  ];
+
+  it.each(onTheWire)("sends %s on the included scenario, for a tool turn and for plain chat", async (model) => {
+    stub = await startStubCopilot({ respond: () => [streamItem("```bash\nls\n```"), completion()] });
+    const { url } = await start();
+    await post(url, { model, messages: [{ role: "user", content: "list" }], tools: [bashTool] });
+    await post(url, { model, messages: [{ role: "user", content: "hello there" }] });
+    expect(stub.connections.length).toBeGreaterThanOrEqual(2);
+    for (const connection of stub.connections) {
+      const query = new URL(connection.url, "http://x").searchParams;
+      expect(query.get("scenario")).toBe("OfficeWebIncludedCopilot");
+      expect(query.get("licenseType")).toBeNull();
+    }
+  });
+
   it("leaves a chat tone on the default framing", async () => {
     stub = await startStubCopilot({ respond: () => [streamItem("```bash\nls\n```"), completion()] });
     const { url } = await start();
@@ -849,6 +1088,9 @@ describe("the turn log", () => {
   });
 });
 
+const OPUS_DAILY =
+  "You've used your available priority access to the Opus model for today. You can choose another available model or wait until tomorrow to use the Opus model again.";
+
 describe("refusals opencode must not retry", () => {
   // opencode always streams, so a refusal reaches it inside a 200 stream, and it then
   // decides from the error's code and wording alone. 2.2.0 got that wrong: a licence
@@ -866,6 +1108,20 @@ describe("refusals opencode must not retry", () => {
           result: { value: "InternalError", message: "ClaudeUnavailableForLicense: Claude isn't available with your current license. Choose another model and try again." },
         },
       },
+      completion(),
+    ],
+    licence: () => [
+      {
+        type: 2,
+        item: {
+          messages: [{ author: "bot", text: "It looks like you don't have a valid licence. Please try again later.", contentOrigin: "BotConnection" }],
+          result: { value: "ForbiddenRequest", errorCode: "InvalidCopilotLicense", message: "It looks like you don't have a valid licence." },
+        },
+      },
+      completion(),
+    ],
+    "priority access exhausted": () => [
+      { type: 2, item: { messages: [], result: { value: "OutOfCredits", message: OPUS_DAILY, creditScenario: "TotalTurn" } } },
       completion(),
     ],
     disengaged: () => [disengaged(), completion()],
@@ -931,6 +1187,53 @@ describe("failures the client has to be able to tell apart", () => {
     const body: any = await response.json();
     expect(body.error.code).toBe("m365_not_served");
     expect(body.error.message).toMatch(/Premium license/);
+  });
+
+  it("reports M365's premium-licence refusal as needing a premium licence", async () => {
+    stub = await startStubCopilot({
+      respond: () => [
+        {
+          type: 2,
+          item: {
+            messages: [{ author: "bot", text: "It looks like you don't have a valid licence.", contentOrigin: "BotConnection" }],
+            result: { value: "ForbiddenRequest", errorCode: "InvalidCopilotLicense", message: "It looks like you don't have a valid licence." },
+          },
+        },
+        completion(),
+      ],
+    });
+    const { url } = await start();
+    const response = await post(url, { messages: [{ role: "user", content: "hi" }] });
+    expect(response.status).toBe(422);
+    const body: any = await response.json();
+    expect(body.error.code).toBe("m365_not_served");
+    expect(body.error.param).toBe("premium_licence_required");
+    expect(body.error.message).toMatch(/premium Microsoft 365 Copilot licen[cs]e/i);
+    expect(stub.connections).toHaveLength(1);
+  });
+
+  it("reports an exhausted priority-access allowance once, without continue retries", async () => {
+    // The refusal only rides in the final item, so a stream reader would see an empty
+    // turn and nudge it with "continue" — each nudge another refused turn.
+    stub = await startStubCopilot({
+      respond: () => [
+        { type: 2, item: { messages: [], result: { value: "OutOfCredits", message: OPUS_DAILY, creditScenario: "TotalTurn" } } },
+        completion(),
+      ],
+    });
+    const { url } = await start();
+    const text = await (
+      await post(url, { stream: true, messages: [{ role: "user", content: "hi" }], tools: [bashTool] })
+    ).text();
+    const line = text.split("\n").find((l) => l.startsWith("data: {") && l.includes('"error"'));
+    const body = JSON.parse(line!.slice("data: ".length));
+    expect(body.error.code).toBe("m365_not_served");
+    expect(body.error.param).toBe("priority_access_exhausted");
+    expect(body.error.message).toMatch(/allowance .*used up/i);
+    expect(body.error.message).toMatch(/midnight UTC/);
+    expect(body.error.message).toMatch(/Opus model for today/);
+    const chats = stub.connections.flatMap((c) => c.frames.filter((f) => f.type === 4));
+    expect(chats).toHaveLength(1);
   });
 
   it("reports Disengaged distinctly rather than as a generic error", async () => {
@@ -1034,5 +1337,329 @@ describe("live settings", () => {
     current = { ...current, leanSystemPrompt: false };
     await post(url, { model: "quick", messages: [...messages.slice(0, 1), { role: "user", content: "again" }], tools: [bashTool] });
     expect(stub.last().frames.find((f) => f.type === 4).arguments[0].message.text).not.toContain("You are a coding agent working in the user's real workspace");
+  });
+});
+
+describe("the mcp proxy over opencode 2's Code Mode catalogue", () => {
+  // What opencode 2 sends: its own function tools (the lean trim keeps five), `execute`,
+  // and a system prompt whose `# Code Mode` section lists the MCP tools, callable only as
+  // JavaScript inside `execute`.
+  const fixture = (name: string) => readFileSync(new URL(`../test/fixtures/${name}`, import.meta.url), "utf8");
+  const leanTools = JSON.parse(fixture("opencode2-lean-tools.json"));
+  const fn = (name: string, description: string, properties: Record<string, unknown>) => ({
+    type: "function" as const,
+    function: { name, description, parameters: { type: "object", properties } },
+  });
+  const executeTool = fn("execute", "Run JavaScript that calls the Code Mode tools", { code: { type: "string" } });
+  const requestTools = [
+    ...leanTools,
+    fn("experimental_image_generate", "Generate an image", { prompt: { type: "string" } }),
+    fn("webfetch", "Fetch a web page", { url: { type: "string" } }),
+    executeTool,
+  ];
+  const systemFor = (section: string) => ({
+    role: "system",
+    content: `You are opencode, an interactive CLI agent.\n\n${section}\nToday's date: Thu Nov 19 2026\n\n<env>\nWorking directory: /home/user/app\n</env>`,
+  });
+  const system = systemFor(fixture("opencode2-codemode.txt"));
+  const partialSystem = systemFor(fixture("opencode2-codemode-partial.txt"));
+  const opener = { role: "user", content: "UNIQUEOPENER file a bug about the build" };
+  const messages = [system, opener];
+
+  const searchReply = "```mcp\nsearch: create a github issue\n```";
+  const callArgs = { owner: "acme", repo: "app", title: "Broken build" };
+  const callReply = "```mcp\ncall: tools.github.create_issue\n" + JSON.stringify(callArgs) + "\n```";
+  const callCodeText = `return await tools.github.create_issue(${JSON.stringify(callArgs)});`;
+
+  const chatText = (connection: { frames: any[] }) =>
+    connection.frames.find((f) => f.type === 4).arguments[0].message.text as string;
+  const blockNames = (text: string) => [...text.matchAll(/^```([a-z_]+)$/gm)].map((m) => m[1]);
+  const catalogueLeaks = /Code Mode|tools\.github|tools\.opencode|Steps to reproduce|Post a message to a Slack channel/;
+
+  /** A stub that answers each M365 turn with the next reply, repeating the last. */
+  const scripted = (...replies: string[]) => {
+    let turn = 0;
+    return startStubCopilot({ respond: () => [streamItem(replies[Math.min(turn++, replies.length - 1)]!), completion()] });
+  };
+
+  const firstCall = (body: any) => body.choices[0].message.tool_calls?.[0];
+
+  it("with the option off: no mcp tool, no execute, and the whole catalogue stripped", async () => {
+    stub = await scripted("ok");
+    const { url } = await start();
+    await post(url, { messages, tools: requestTools });
+    const text = chatText(stub.last());
+    expect(blockNames(text)).not.toContain("mcp");
+    expect(blockNames(text)).not.toContain("execute");
+    expect(text).not.toMatch(catalogueLeaks);
+    expect(text).toContain("Working directory: /home/user/app");
+  });
+
+  it("ignores the old, unreleased `mcp` dep: only `mcpProxy` turns the proxy on", async () => {
+    stub = await scripted("ok");
+    const { url } = await start({ mcp: true });
+    await post(url, { messages, tools: requestTools });
+    expect(blockNames(chatText(stub.last()))).not.toContain("mcp");
+  });
+
+  for (const lean of [true, false]) {
+    it(`with the option on (lean ${lean ? "on" : "off"}): offers mcp, never execute, and never the catalogue`, async () => {
+      stub = await scripted("ok");
+      const { url } = await start({ mcpProxy: true, lean });
+      await post(url, { messages, tools: requestTools });
+      const text = chatText(stub.last());
+      const offered = blockNames(text);
+      expect(offered).toContain("mcp");
+      expect(offered).toContain("shell");
+      expect(offered).not.toContain("execute");
+      expect(text).not.toMatch(catalogueLeaks);
+      expect(text).not.toContain("`execute`");
+      expect(text).toMatch(/Use 12 tools from my MCP servers/);
+      expect(text).toContain("github (create_issue");
+    });
+  }
+
+  it("offers no mcp tool when the prompt has no Code Mode catalogue", async () => {
+    stub = await scripted("ok");
+    const { url } = await start({ mcpProxy: true });
+    await post(url, { messages: [opener], tools: requestTools });
+    const offered = blockNames(chatText(stub.last()));
+    expect(offered).not.toContain("mcp");
+    expect(offered).not.toContain("execute");
+  });
+
+  it("answers a search in the same conversation, with the matches' signatures", async () => {
+    stub = await scripted(searchReply, "Found it.");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+
+    expect(stub.connections).toHaveLength(2);
+    const [first, second] = stub.connections.map((c) => c.frames.find((f) => f.type === 4).arguments[0]);
+    expect(second.conversationId).toBe(first.conversationId);
+    expect(second.message.text).toContain('Tools matching "create a github issue"');
+    expect(second.message.text).toContain("tools.github.create_issue({");
+    expect(body.choices[0].finish_reason).toBe("stop");
+    expect(body.choices[0].message.content).toBe("Found it.");
+  });
+
+  it("turns a call into an execute tool call with the exact code", async () => {
+    stub = await scripted(searchReply, callReply);
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+
+    expect(stub.connections).toHaveLength(2);
+    expect(body.choices[0].finish_reason).toBe("tool_calls");
+    expect(body.choices[0].message.tool_calls).toHaveLength(1);
+    const call = firstCall(body).function;
+    expect(call.name).toBe("execute");
+    expect(JSON.parse(call.arguments)).toEqual({ code: callCodeText });
+  });
+
+  it("accepts a catalogued call without a search first, and `key: value` arguments", async () => {
+    stub = await scripted("```mcp\ncall: tools.slack.post_message\nchannel: general\ntext: hello there\n```");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+
+    expect(stub.connections).toHaveLength(1);
+    expect(JSON.parse(firstCall(body).function.arguments)).toEqual({
+      code: 'return await tools.slack.post_message({"channel":"general","text":"hello there"});',
+    });
+  });
+
+  it("calls a bracket-notation tool by its exact path", async () => {
+    stub = await scripted('```mcp\ncall: tools.github["search-code"]\n{"q": "TODO"}\n```');
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+    expect(JSON.parse(firstCall(body).function.arguments)).toEqual({
+      code: 'return await tools.github["search-code"]({"q":"TODO"});',
+    });
+  });
+
+  it("answers an unknown path in the proxy, and never sends it to opencode", async () => {
+    stub = await scripted("```mcp\ncall: tools.github.delete_repo\n{}\n```", "I could not find it.");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+
+    expect(stub.connections).toHaveLength(2);
+    expect(chatText(stub.connections[1]!)).toContain("There is no tool tools.github.delete_repo");
+    expect(body.choices[0].finish_reason).toBe("stop");
+    expect(body.choices[0].message.content).toBe("I could not find it.");
+  });
+
+  it("answers an unreadable mcp block in the proxy with the expected shape", async () => {
+    stub = await scripted("```mcp\ncall: tools.github.create_issue\n{not json\n```", "ok");
+    const { url } = await start({ mcpProxy: true });
+    await post(url, { messages, tools: requestTools });
+    expect(stub.connections).toHaveLength(2);
+    const text = chatText(stub.connections[1]!);
+    expect(text).toContain("could not be read: the arguments are not valid JSON");
+    expect(text).toContain("call: tools.<server>.<tool>");
+  });
+
+  it("never emits an execute call for an execute block the model wrote itself", async () => {
+    stub = await scripted("```execute\nreturn await tools.github.create_issue({});\n```");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+    expect(body.choices[0].message.tool_calls).toBeUndefined();
+  });
+
+  it("sends a search with no local match to opencode's own search when the catalogue is partial", async () => {
+    stub = await scripted("```mcp\nsearch: zebra quokka\n```");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages: [partialSystem, opener], tools: requestTools })).json();
+
+    expect(stub.connections).toHaveLength(1);
+    const call = firstCall(body).function;
+    expect(call.name).toBe("execute");
+    expect(JSON.parse(call.arguments)).toEqual({ code: 'return await search("zebra quokka");' });
+  });
+
+  it("answers a search with no match itself when the catalogue is complete", async () => {
+    stub = await scripted("```mcp\nsearch: zebra quokka\n```", "Nothing there.");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+    expect(stub.connections).toHaveLength(2);
+    expect(chatText(stub.connections[1]!)).toContain('No tool matched "zebra quokka"');
+    expect(body.choices[0].message.content).toBe("Nothing there.");
+  });
+
+  it("accepts any well-formed path when the catalogue is partial", async () => {
+    stub = await scripted('```mcp\ncall: tools.linear.create_ticket\n{"title": "x"}\n```');
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages: [partialSystem, opener], tools: requestTools })).json();
+    expect(JSON.parse(firstCall(body).function.arguments)).toEqual({
+      code: 'return await tools.linear.create_ticket({"title":"x"});',
+    });
+  });
+
+  it("stops after 3 proxy answers and returns the prose, never an mcp call", async () => {
+    stub = await scripted("Let me look.\n\n```mcp\nsearch: something else\n```");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+
+    expect(stub.connections).toHaveLength(4);
+    expect(body.choices[0].finish_reason).toBe("stop");
+    expect(body.choices[0].message.tool_calls).toBeUndefined();
+    expect(body.choices[0].message.content).not.toContain("```mcp");
+    expect(body.choices[0].message.content).toContain("Let me look.");
+  });
+
+  it("counts unknown paths toward the cap too", async () => {
+    stub = await scripted("```mcp\ncall: tools.nope.nothing\n{}\n```");
+    const { url } = await start({ mcpProxy: true });
+    const body: any = await (await post(url, { messages, tools: requestTools })).json();
+    expect(stub.connections).toHaveLength(4);
+    expect(body.choices[0].message.tool_calls).toBeUndefined();
+  });
+
+  it("streams the execute call after a search, never an mcp call", async () => {
+    stub = await scripted(searchReply, callReply);
+    const { url } = await start({ mcpProxy: true });
+    const text = await (await post(url, { stream: true, messages, tools: requestTools })).text();
+    expect(text).toContain('"name":"execute"');
+    expect(text).toContain(JSON.stringify(JSON.stringify({ code: callCodeText })).slice(1, -1));
+    expect(text).not.toContain('"name":"mcp"');
+    expect(text).toContain('"finish_reason":"tool_calls"');
+    expect(text).toContain("[DONE]");
+  });
+
+  it("never streams an mcp call, even past the cap", async () => {
+    stub = await scripted(searchReply);
+    const { url } = await start({ mcpProxy: true });
+    const text = await (await post(url, { stream: true, messages, tools: requestTools })).text();
+    expect(text).not.toContain("tool_calls");
+    expect(text).toContain('"finish_reason":"stop"');
+    expect(text).toContain("[DONE]");
+  });
+
+  it("records each search and the call in the turn log", async () => {
+    stub = await scripted(searchReply, callReply);
+    const entries: any[] = [];
+    const { url } = await start({ mcpProxy: true, turnLog: (entry: unknown) => entries.push(entry) });
+    await post(url, { messages, tools: requestTools });
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ toolCalls: ["mcp"] });
+    expect(entries[0].mcpSearch).toBeUndefined();
+    expect(entries[0].mcpCall).toBeUndefined();
+    expect(entries[1]).toMatchObject({ mcpSearch: "create a github issue", mcpCall: "tools.github.create_issue" });
+    expect(entries[1].tools).toContain("mcp");
+    expect(entries[1].tools).not.toContain("execute");
+  });
+
+  it("sends only the new tool result on the next request, labelled as the mcp tool's", async () => {
+    stub = await scripted(callReply, "Filed as #42.");
+    const { url } = await start({ mcpProxy: true });
+    const send = (history: unknown[]) =>
+      authedFetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", [SESSION_ID_HEADER]: "ses_mcp" },
+        body: JSON.stringify({ messages: history, tools: requestTools }),
+      });
+    const first: any = await (await send(messages)).json();
+    const call = firstCall(first);
+    const second: any = await (
+      await send([
+        ...messages,
+        { role: "assistant", content: null, tool_calls: [call] },
+        { role: "tool", tool_call_id: call.id, content: "UNIQUERESULT issue #42" },
+      ])
+    ).json();
+
+    expect(stub.connections).toHaveLength(2);
+    const text = chatText(stub.last());
+    expect(text).toContain("UNIQUERESULT");
+    expect(text).toContain('<tool_response tool="mcp">');
+    expect(text).not.toContain("UNIQUEOPENER");
+    expect(text).not.toMatch(catalogueLeaks);
+    expect(second.choices[0].message.content).toBe("Filed as #42.");
+  });
+
+  it("replays the proxy's execute calls into a fresh conversation as the mcp blocks the model wrote", async () => {
+    stub = await scripted("ok");
+    const { url } = await start({ mcpProxy: true });
+    const executeCall = (id: string, code: string) => ({
+      id,
+      type: "function",
+      function: { name: "execute", arguments: JSON.stringify({ code }) },
+    });
+    await post(url, {
+      messages: [
+        partialSystem,
+        opener,
+        { role: "assistant", content: null, tool_calls: [executeCall("c1", 'return await search("linear tickets");')] },
+        { role: "tool", tool_call_id: "c1", content: "SEARCHRESULT tools.linear.create_ticket" },
+        { role: "assistant", content: null, tool_calls: [executeCall("c2", callCodeText)] },
+        { role: "tool", tool_call_id: "c2", content: "CALLRESULT #42" },
+        { role: "assistant", content: null, tool_calls: [executeCall("c3", "const x = 1; return x;")] },
+        { role: "tool", tool_call_id: "c3", content: "OTHERRESULT" },
+        { role: "user", content: "and now?" },
+      ],
+      tools: requestTools,
+    });
+
+    const text = chatText(stub.last());
+    expect(text).toContain("```mcp\nsearch: linear tickets\n```");
+    expect(text).toContain("```mcp\ncall: tools.github.create_issue\n" + JSON.stringify(callArgs) + "\n```");
+    expect(text).toContain('<tool_response tool="mcp">\nSEARCHRESULT');
+    expect(text).toContain('<tool_response tool="mcp">\nCALLRESULT');
+    // Code the proxy did not write renders as it always has.
+    expect(text).toContain("```execute");
+    expect(text).toContain("const x = 1; return x;");
+  });
+});
+
+describe("stripMcpCalls", () => {
+  it("drops an mcp block and keeps the prose around it", () => {
+    expect(stripMcpCalls("Looking.\n\n```mcp\nsearch: x\n```\n\nThen more.")).toBe("Looking.\n\nThen more.");
+  });
+
+  it("leaves a reply without an mcp block untouched", () => {
+    const text = "  Some prose.\n\n\n```bash\nls\n```\n";
+    expect(stripMcpCalls(text)).toBe(text);
+  });
+
+  it("does not touch a block for a tool whose name only starts with mcp", () => {
+    const text = "```mcp_server_tool\nx\n```";
+    expect(stripMcpCalls(text)).toBe(text);
   });
 });

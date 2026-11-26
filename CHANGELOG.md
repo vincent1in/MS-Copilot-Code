@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.5.0 (this fork, 2026-11-26)
+
+Brings in upstream 2.3.0 and 2.4.0, without anything that costs extra.
+
+### Features
+
+* **One-line install and update.** `install.sh` (macOS, Linux) and `install.ps1` (Windows) download the latest release from this repository, check the zip and every file in it, and install or update one folder that OpenCode keeps loading. Run the same command again to update; settings and sign-in are kept. `--zip` installs a zip you already downloaded.
+* **A Release button.** `.github/workflows/release.yml` builds, tests with no network, and publishes a release when the repository's owner presses *Run workflow*, then runs both install commands on Linux, macOS and Windows.
+* **GPT-6.2 Sol** (`m365/gpt-6.2-sol`), on the included scenario, routed like the other Sol models. GPT-6.1 Sol stays the default.
+* **The session's message budget in OpenCode's footer and sidebar** (`M365 12/600 msgs`), with the estimated context size, from upstream. OpenCode's context meter now gets estimated token counts.
+* **MCP tool search** (experimental, off by default): a Settings option, `mcpProxy`, or `M365_MCP_PROXY=1`. Copilot gets one `mcp` tool to search and call the MCP tools you added to OpenCode. Each search and the gateway's answer show on the page.
+
+### Fixes, from upstream
+
+* A tool block whose fence M365 opened at the end of a sentence now runs.
+* Each model is listed once in OpenCode's picker; the old duplicate ids still work as aliases.
+
+### Changed
+
+* Claude's tool turns use the relay framing, as upstream now does for agent-less Claude.
+
+### Left out of upstream 2.4
+
+* Every model that needs a premium licence, M365's paid scenario or Copilot credits: GPT-6.2 Astra, GPT-6 Astra, GPT-6 (Think Deeper), Claude Opus 5.5 and 4.8, Claude Sonnet 5.5, Claude Sonnet 5 and Claude Fable 5.1. The paid scenario is never sent.
+* The learned agent route and `M365_FORCE_AGENT`: this fork attaches no agent.
+
+### Dependencies
+
+* `@azure/msal-node` 7.2.3 and `@azure/msal-common` 16.17.0, `ws` 8.23.0, `playwright` 1.65.1, and `@opencode/plugin` 2.4.2 (types only).
+
 ## 2.4.0 (this fork, 2026-11-12)
 
 ### Features

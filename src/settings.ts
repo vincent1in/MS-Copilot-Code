@@ -4,7 +4,8 @@
  *
  * Where a value comes from, strongest first:
  *
- * 1. An environment variable (`M365_WORK_IQ`, `M365_WEB_SEARCH=1`, `M365_MONITOR=1`).
+ * 1. An environment variable (`M365_WORK_IQ`, `M365_WEB_SEARCH=1`, `M365_MCP_PROXY=1`,
+ *    `M365_MONITOR=1`).
  * 2. The plugin's options in OpenCode's config, when this gateway runs inside OpenCode.
  * 3. What was saved from the Settings page, in `settings.json` (owner-only).
  * 4. The default.
@@ -36,6 +37,12 @@ export interface GatewaySettings {
   workIq: WorkIqPolicy;
   /** Offer Copilot Bing web search on coding turns. */
   webSearch: boolean;
+  /**
+   * Give Copilot one `mcp` tool to search and call your MCP tools (opencode 2's Code
+   * Mode catalogue). A search sends the matching tools' names, descriptions and
+   * arguments to Copilot; off, Copilot is shown none of them.
+   */
+  mcpProxy: boolean;
   /** Trim OpenCode's tools to the few Copilot keeps engaging with. */
   lean: boolean;
   /** Replace OpenCode's long system prompt with a short one. */
@@ -54,6 +61,7 @@ export type SettingKey = keyof GatewaySettings;
 export const DEFAULT_SETTINGS: Readonly<GatewaySettings> = {
   workIq: "hold",
   webSearch: false,
+  mcpProxy: false,
   lean: true,
   leanSystemPrompt: false,
   localTitles: true,
@@ -113,6 +121,11 @@ const SPECS: { [K in SettingKey]: Spec<K> } = {
     parse: bool,
     env: { name: "M365_WEB_SEARCH", read: (raw) => (raw === "1" ? true : undefined) },
     plugin: { name: "webSearch", read: bool },
+  },
+  mcpProxy: {
+    parse: bool,
+    env: { name: "M365_MCP_PROXY", read: (raw) => (raw === "1" ? true : undefined) },
+    plugin: { name: "mcpProxy", read: bool },
   },
   lean: { parse: bool, plugin: { name: "lean", read: bool } },
   leanSystemPrompt: { parse: bool, plugin: { name: "leanSystemPrompt", read: bool } },

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { buildModelInfos } from "./config.js";
 import {
   DEFAULT_MODEL,
   LOCAL_TITLE_MODEL,
+  MODEL_ALIASES,
   MODELS,
   isLocalModel,
   listModelIds,
@@ -122,12 +124,12 @@ describe("model picker names", () => {
   it("warns in the name that GPT-5.6 chat is unreliable at calling tools", () => {
     // The reference project measured 7/30; ours 0/1. The name is the only place to say so.
     for (const id of ["gpt-5.6", "gpt-5.6-quick"]) expect(resolveModel(id).name).toMatch(/unreliable tool calls/);
+    expect(resolveModel("gpt-5.6-quick").name).toContain("GPT-5.6 (Quick");
     expect(resolveModel("quick").name).not.toMatch(/unreliable/);
   });
 
   it("lists GPT-5.6 chat after the default", () => {
     const ids = MODELS.map((model) => model.id);
-    expect(ids.indexOf("gpt-5.6")).toBeGreaterThan(ids.indexOf("quick"));
     expect(ids.indexOf("gpt-5.6-quick")).toBeGreaterThan(ids.indexOf("quick"));
   });
 
@@ -147,7 +149,160 @@ describe("how each tone is asked to call tools", () => {
     expect(toolRouteFor("Gpt_5_5_Reasoning")).toEqual({ framing: "relay" });
   });
 
-  it("leaves Claude on the default framing", () => {
-    for (const tone of ["Claude_Sonnet", "Claude_Sonnet_Reasoning"]) expect(toolRouteFor(tone)).toEqual({ framing: "default" });
+  it("sends Claude as a relay, the route the reference project measured agent-less", () => {
+    for (const tone of ["Claude_Sonnet", "Claude_Sonnet_Reasoning"]) expect(toolRouteFor(tone)).toEqual({ framing: "relay" });
+  });
+
+  it("routes GPT-6.2 Sol like the other Sol tones, steering it off its own sandbox", () => {
+    expect(toolRouteFor("Gpt_62_Sol_Reasoning")).toEqual(toolRouteFor("Gpt_61_Sol_Reasoning"));
+    expect(toolRouteFor("Gpt_62_Sol_Reasoning").sandbox).toContain("bash_tool");
+  });
+});
+
+describe("compatibility aliases", () => {
+  // Each pair once showed twice in opencode's picker under one name.
+  const pairs: Array<[alias: string, canonical: string]> = [
+    ["auto", "m365-copilot"],
+    ["claude", "claude-sonnet"],
+    ["gpt-5.4", "gpt-5.4-think-deeper"],
+    ["gpt-5.3", "gpt-5.3-quick"],
+    ["gpt-5.2", "gpt-5.2-quick"],
+    // The chat tones, folded too: one picker entry each.
+    ["gpt-5.5", "quick"],
+    ["gpt-5.5-quick", "quick"],
+    ["gpt-5.6", "gpt-5.6-quick"],
+    // And the reasoning tone's generic id.
+    ["think-deeper", "gpt-5.5-think-deeper"],
+    // The included-scenario Claude Sonnet, by version.
+    ["claude-sonnet-4.6", "claude-sonnet"],
+    ["claude-sonnet-4.5", "claude-sonnet"],
+  ];
+
+  it("advertises one model per tone", () => {
+    const tones = MODELS.filter((model) => model.tone).map((model) => model.tone);
+    expect(new Set(tones).size, `shared: ${tones.filter((t, i) => tones.indexOf(t) !== i)}`).toBe(tones.length);
+  });
+
+  it("names the upstream default by its generation", () => {
+    expect(resolveModel("quick").name).toContain("GPT-5.5 (Quick)");
+  });
+
+  it("advertises unique ids and no duplicate picker names", () => {
+    const names = MODELS.map((model) => model.name);
+    expect(new Set(names).size, `duplicate names: ${names.filter((n, i) => names.indexOf(n) !== i)}`).toBe(names.length);
+    const ids = listModelIds();
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("maps each alias to its canonical id", () => {
+    expect(Object.entries(MODEL_ALIASES).sort()).toEqual([...pairs].sort());
+  });
+
+  it.each(pairs)("%s resolves to the same model as %s", (alias, canonical) => {
+    expect(resolveModel(alias)).toBe(resolveModel(canonical));
+    expect(resolveModel(alias).id).toBe(canonical);
+  });
+
+  it.each(pairs)("the prefixed m365/%s still resolves", (alias, canonical) => {
+    expect(resolveModel(`m365/${alias}`).id).toBe(canonical);
+  });
+
+  it("keeps aliases out of every advertised list", () => {
+    const aliases = Object.keys(MODEL_ALIASES);
+    for (const id of [...listModelIds(), ...buildModelInfos().map((model) => model.id)]) {
+      expect(aliases).not.toContain(id);
+    }
+  });
+
+  it("leaves the canonical models' tone and reasoning unchanged", () => {
+    expect(resolveModel("auto")).toMatchObject({ tone: "magic", reasoning: false });
+    expect(resolveModel("claude")).toMatchObject({ tone: "Claude_Sonnet", reasoning: false });
+    expect(resolveModel("gpt-5.4")).toMatchObject({ tone: "Gpt_5_4_Reasoning", reasoning: true });
+    expect(resolveModel("gpt-5.3")).toMatchObject({ tone: "Gpt_5_3_Chat", reasoning: false });
+    expect(resolveModel("gpt-5.2")).toMatchObject({ tone: "Gpt_5_2_Chat", reasoning: false });
+  });
+
+  it("keeps the catalogue order: the recommended Sol first, the local titler last", () => {
+    const ids = listModelIds();
+    expect(ids.slice(0, 3)).toEqual(["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-sol"]);
+    expect(ids.indexOf("gpt-5.6-think-deeper")).toBeLessThan(ids.indexOf("gpt-5.5-think-deeper"));
+    expect(ids.at(-1)).toBe(LOCAL_TITLE_MODEL);
+  });
+});
+
+describe("GPT-6 Sol models", () => {
+  // From the reference protocol notes: each serves on the included scenario on every
+  // account, and agent-less has a remote bash sandbox of its own.
+  const sol: Array<[id: string, tone: string]> = [
+    ["gpt-6-sol", "Gpt_6_Sol_Reasoning"],
+    ["gpt-6.1-sol", "Gpt_61_Sol_Reasoning"],
+    ["gpt-6.2-sol", "Gpt_62_Sol_Reasoning"],
+  ];
+
+  it.each(sol)("%s selects %s, as a reasoning model", (id, tone) => {
+    const model = resolveModel(id);
+    expect(model.id).toBe(id);
+    expect(model.tone).toBe(tone);
+    expect(model.reasoning).toBe(true);
+    expect(resolveModel(`m365/${id}`).id).toBe(id);
+  });
+
+  it.each(sol)("%s is framed as a relay that steers it off its own sandbox", (_id, tone) => {
+    const route = toolRouteFor(tone);
+    expect(route.framing).toBe("relay");
+    expect(route.sandbox).toContain("bash_tool");
+  });
+
+  it("names them as in the M365 web client", () => {
+    expect(resolveModel("gpt-6.2-sol").name).toBe("Code · GPT-6.2 Sol");
+    expect(resolveModel("gpt-6.1-sol").name).toContain("GPT-6.1 Sol");
+  });
+
+  it("puts GPT-6.2 Sol in opencode's catalogue, with tools on", () => {
+    const info = buildModelInfos().find((candidate) => candidate.id === "gpt-6.2-sol");
+    expect(info).toBeDefined();
+    expect(info!.capabilities.tools).toBe(true);
+  });
+});
+
+describe("models that need a premium licence or spend Copilot credits", () => {
+  // Upstream lists these. This fork does not, and never sends M365's paid scenario.
+  const excluded = [
+    "gpt-6.2-astra",
+    "gpt-6-astra",
+    "gpt-6-think-deeper",
+    "claude-opus",
+    "claude-opus-4.8",
+    "claude-sonnet-5.5",
+    "claude-sonnet-5",
+    "claude-fable",
+    "work",
+    "work-think",
+  ];
+
+  it.each(excluded)("does not list %s", (id) => {
+    expect(listModelIds()).not.toContain(id);
+    expect(buildModelInfos().map((model) => model.id)).not.toContain(id);
+    expect(Object.keys(MODEL_ALIASES)).not.toContain(id);
+  });
+
+  it.each(excluded)("answers a request for %s on the default model instead", (id) => {
+    expect(resolveModel(id).id).toBe(DEFAULT_MODEL);
+    expect(resolveModel(`m365/${id}`).id).toBe(DEFAULT_MODEL);
+  });
+
+  it("selects none of their tones", () => {
+    const tones = new Set(MODELS.map((model) => model.tone));
+    for (const tone of ["Gpt_62_Astra_Reasoning", "Gpt_6_Astra_Reasoning", "Gpt_6_Reasoning", "Claude_Opus", "Claude_Sonnet_5", "Claude_Fable"]) {
+      expect(tones.has(tone), tone).toBe(false);
+    }
+  });
+
+  it("marks no model as spending credits", () => {
+    for (const model of MODELS) expect(model.credits, model.id).toBeFalsy();
+  });
+
+  it("does not label any model Premium or credit-billed", () => {
+    for (const model of MODELS) expect(model.name, model.id).not.toMatch(/Premium|credits/);
   });
 });

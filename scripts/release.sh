@@ -67,6 +67,7 @@ EOF
 
 chmod -R u=rwX,go=rX "$stage"
 chmod 755 "$stage/start.sh" "$stage/scripts/release.sh"
+# shellcheck disable=SC2094 # SHA256SUMS is written here and left out of the list (! -name).
 (cd "$stage" && find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | sed 's|^\./||' | while IFS= read -r file; do
   sha256sum "$file"
 done > SHA256SUMS)

@@ -20,18 +20,29 @@ security review event, not a routine edit:
    credential entry.
 5. **No tenant side effects.** Upstream's Copilot Studio agent is removed; do not bring
    back anything that creates or changes resources in the tenant. `doctor` stays read-only.
-6. **Opt-in data sharing.** Bing web search stays opt-in (`webSearch` / `M365_WEB_SEARCH=1`);
-   no mailbox-grounded models; Work IQ replies are held by default.
-7. **OpenCode's config changes only when the user asks**: the page's Connect button or
+6. **Opt-in data sharing.** Bing web search stays opt-in (`webSearch` / `M365_WEB_SEARCH=1`),
+   and so does MCP tool search (`mcpProxy` / `M365_MCP_PROXY=1`): off, M365 is shown no MCP
+   tool. No mailbox-grounded models; Work IQ replies are held by default.
+7. **Nothing that spends money or credits.** Every listed model is on M365's included
+   scenario (`OfficeWebIncludedCopilot`), and `buildUrl` never sends the paid scenario or a
+   `licenseType`. Do not add a model upstream marks premium, paid-scenario, metered or
+   billed to Copilot credits.
+8. **OpenCode's config changes only when the user asks**: the page's Connect button or
    `setup`. Either one adds this folder (and, if asked, the three quiet keys), keeps the rest
    of the file, saves a `.bak` first, refuses invalid JSON and never rewrites an
    `opencode.jsonc`. The page's endpoints keep the monitor's protections (key, `Host`,
    `Origin`, `Sec-Fetch-Site`, JSON only).
-8. **The sign-in browser stays quiet**: keep `QUIET_BROWSER_ARGS` in `src/login.ts`, and
+9. **The sign-in browser stays quiet**: keep `QUIET_BROWSER_ARGS` in `src/login.ts`, and
    re-measure with `doctor --browser` when Playwright or the browser changes.
    `scripts/sealed-network/run.sh` re-runs the whole outbound and inbound check on Linux.
-9. **Tokens never reach logs** — everything written by `log.ts` or the turn log passes `redact()`.
-10. **CI** stays read-only, secret-free, with actions pinned to commit SHAs.
+10. **Tokens never reach logs** — everything written by `log.ts` or the turn log passes `redact()`.
+11. **CI** stays read-only, secret-free, with actions pinned to commit SHAs. The one
+    exception is `release.yml`: it runs only when started by hand from `main`, and only
+    its publishing job may write releases. It creates the `v<version>` tag, never moves one.
+12. **The installers download only the release.** `install.sh` and `install.ps1` fetch the
+    zip and its `.sha256` from this repository's latest GitHub release, check both layers
+    of hashes before installing, change nothing outside their folder and never edit
+    OpenCode's config. `test/install-script.test.ts` holds them to that.
 
 ## What this is
 
@@ -56,7 +67,10 @@ measured against a live tenant:
 | `agent.<name>.prompt` from the `config` hook | Ignored the same way |
 
 The proxy sees the final OpenAI request. That is where `selectLeanTools` and
-`condenseSystemPrompt` run, and where anything similar should go.
+`condenseSystemPrompt` run, and where anything similar should go. The `mcp` tool lives
+in the proxy for the same reason: opencode 2's Code Mode catalogue and its `execute`
+tool have to stay out of what M365 receives, and only the proxy controls that. M365's
+`mcp` searches are answered there, and its calls become `execute` calls the proxy emits.
 
 If you re-test these on a newer opencode and one starts working, say so in the README —
 do not silently move the logic back.
@@ -70,9 +84,12 @@ do not silently move the logic back.
 | `src/login.ts` | The browser sign-in. CLI-only, Playwright is an optional dependency |
 | `src/egress.ts` | The outbound allowlist, and MSAL's guarded network client |
 | `src/fenced.ts` | The fenced tool-call contract, both directions, plus the hardening layers |
+| `src/codemode.ts` | Parse opencode 2's Code Mode catalogue (the MCP tools, callable only in `execute`) and strip the whole section from the prompt |
+| `src/mcp.ts` | The opt-in `mcp` tool over that catalogue: summary, search, `call:` parsing, and the `execute` code templates and their inverse |
 | `src/image.ts` | Image input: collect `image_url` parts, upload to M365, build the annotation |
 | `src/translate.ts` | OpenAI ⇄ M365: conversation pooling, delta sends, prompt condensing, streaming |
 | `src/server.ts` | The HTTP surface. `node:http`, loopback only, per-launch bearer secret, no CORS |
+| `src/metrics.ts` | Per-session UI metrics: the bounded (LRU) store, `metering` → named allowances, the `m365-copilot.metrics` RPC definition and its HTTP fallback for an external proxy |
 | `src/config.ts` | Provider config and tool policy — the pure decisions |
 | `src/plugin.ts` | The entry. One default export, `{ id, setup }` — nothing else |
 | `src/plugin-v2.ts` | opencode 2's `setup()`: provider/model transforms and the title hook |
@@ -81,7 +98,11 @@ do not silently move the logic back.
 | `src/opencode-config.ts` | Reading OpenCode's config for the page; `setup`'s edit, with a backup |
 | `src/open-url.ts` | Opening the page in the default browser (the only child process) |
 | `src/monitor/` | The page: its loopback server, the turn recorder, Set up's controller, and `ui/` |
+| `src/tui.ts` | The TUI entry, exported as `./tui`. One default export, `{ id, setup }`; loads the host's Solid runtime by dynamic import |
+| `src/tui-status.ts` | The footer line and sidebar lines: pure formatting, the metrics feed, and the slot rendering |
 | `src/cli.ts` | `opencode-m365 start \| open \| login \| setup \| serve \| monitor \| doctor` |
+| `install.sh`, `install.ps1` | The one-line installers: fetch the latest release, check it, install or update one folder |
+| `.github/workflows/release.yml` | The Release button: test with no network, build the zip, publish it, then run both installers on Linux, macOS and Windows |
 
 ## Testing
 

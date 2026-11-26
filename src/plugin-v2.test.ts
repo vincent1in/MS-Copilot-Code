@@ -3,6 +3,15 @@ import { PROVIDER_ID } from "./config.js";
 import { DEFAULT_MODEL, LOCAL_TITLE_MODEL } from "./models.js";
 import { AUX_REQUEST_KIND_HEADER, SESSION_ID_HEADER } from "./server.js";
 import { setup } from "./plugin-v2.js";
+import { METRICS_RPC, SessionMetricsStore } from "./metrics.js";
+import { resolveModel } from "./models.js";
+import { startRuntime } from "./runtime.js";
+
+// The real startRuntime, spied on so one test can hand setup an in-process store.
+vi.mock("./runtime.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./runtime.js")>();
+  return { ...actual, startRuntime: vi.fn(actual.startRuntime) };
+});
 
 /**
  * A stand-in for the slice of opencode 2's plugin context we actually touch.
@@ -16,6 +25,7 @@ function fakeContext(options: Record<string, unknown> = {}) {
   const providerTransforms: Array<(editor: any) => void> = [];
   const modelTransforms: Array<(editor: any) => void> = [];
   const hooks = new Map<string, (event: any) => void>();
+  const rpcs: Array<{ definition: any; handlers: any; emitted: unknown[][]; disposed: boolean }> = [];
 
   const registration = { dispose: async () => {} };
 
@@ -39,14 +49,36 @@ function fakeContext(options: Record<string, unknown> = {}) {
         return registration;
       }),
     },
+    rpc: {
+      register: vi.fn(async (definition: any, handlers: any) => {
+        const entry = { definition, handlers, emitted: [] as unknown[][], disposed: false };
+        rpcs.push(entry);
+        return {
+          dispose: async () => {
+            entry.disposed = true;
+          },
+          events: {
+            emit: async (...args: unknown[]) => {
+              entry.emitted.push(args);
+            },
+          },
+        };
+      }),
+    } as { register: (...args: any[]) => Promise<unknown> } | undefined,
   };
 
   return {
     ctx,
     /** Run every registered provider transform against a recording editor. */
-    runProviderTransforms() {
-      const added: any[] = [];
-      const editor = { add: (input: any) => added.push(input) };
+    runProviderTransforms(added: any[] = []) {
+      const editor = {
+        // opencode's `get` answers a ProviderRecord: `{ provider, models }`.
+        get: (id: string) => {
+          const input = added.find((candidate) => candidate.info.id === id);
+          return input ? { provider: input.info, models: new Map() } : undefined;
+        },
+        add: (input: any) => added.push(input),
+      };
       for (const transform of providerTransforms) transform(editor);
       return added;
     },
@@ -67,6 +99,7 @@ function fakeContext(options: Record<string, unknown> = {}) {
     hook(name: string) {
       return hooks.get(name);
     },
+    rpcs,
   };
 }
 
@@ -90,6 +123,24 @@ describe("the opencode 2 setup", () => {
     expect(added[0].models.map((model: any) => model.id)).toContain(DEFAULT_MODEL);
   });
 
+  it("registers the provider once when the plugin is loaded twice", async () => {
+    // Seen on a work install: every m365 model listed twice. Two plugin entries (say
+    // the npm package and a local checkout) each ran setup and each added the provider.
+    const first = fakeContext(withProxy());
+    const second = fakeContext(withProxy());
+    await setup(first.ctx as never);
+    await setup(second.ctx as never);
+
+    const added: any[] = [];
+    first.runProviderTransforms(added);
+    second.runProviderTransforms(added);
+    expect(added).toHaveLength(1);
+
+    // A replay of the registry rebuild must not add it again either.
+    first.runProviderTransforms(added);
+    expect(added).toHaveLength(1);
+  });
+
   it("selects our default model when the user has not chosen one", async () => {
     const harness = fakeContext(withProxy());
     await setup(harness.ctx as never);
@@ -98,6 +149,26 @@ describe("the opencode 2 setup", () => {
       providerID: PROVIDER_ID,
       modelID: DEFAULT_MODEL,
     });
+  });
+
+  it("moves a saved default that names an alias onto its canonical id", async () => {
+    // opencode looks the default up in the catalogue, which no longer lists aliases.
+    const harness = fakeContext(withProxy());
+    await setup(harness.ctx as never);
+    expect(harness.runModelTransforms({ providerID: PROVIDER_ID, modelID: "gpt-5.5" })).toEqual({
+      providerID: PROVIDER_ID,
+      modelID: "quick",
+    });
+    expect(harness.runModelTransforms({ providerID: PROVIDER_ID, modelID: "auto" })).toEqual({
+      providerID: PROVIDER_ID,
+      modelID: "m365-copilot",
+    });
+  });
+
+  it("does so even with setDefaultModel off", async () => {
+    const harness = fakeContext(withProxy({ setDefaultModel: false }));
+    await setup(harness.ctx as never);
+    expect(harness.runModelTransforms({ providerID: PROVIDER_ID, modelID: "gpt-5.6" })?.modelID).toBe("gpt-5.6-quick");
   });
 
   it("leaves a model the user already chose alone", async () => {
@@ -204,6 +275,48 @@ describe("the opencode 2 setup", () => {
       const event = { kind: "primary", sessionID: "ses_1", model: { providerID: "anthropic", id: "claude" }, headers: {} as Record<string, string> };
       harness.hook("model.request")!(event);
       expect(event.headers).toEqual({});
+    });
+  });
+
+  describe("serving per-session metrics to the TUI", () => {
+    it("registers the metrics RPC, which answers null when the external proxy has nothing", async () => {
+      const harness = fakeContext(withProxy());
+      await setup(harness.ctx as never);
+
+      expect(harness.rpcs).toHaveLength(1);
+      expect(harness.rpcs[0]!.definition).toBe(METRICS_RPC);
+      await expect(harness.rpcs[0]!.handlers.get({ sessionID: "ses_1" }, {})).resolves.toEqual({ metrics: null });
+    });
+
+    it("answers from the in-process proxy's store, and says when a session changed", async () => {
+      const metrics = new SessionMetricsStore();
+      const actual = await vi.importActual<typeof import("./runtime.js")>("./runtime.js");
+      const external = await actual.startRuntime(withProxy());
+      vi.mocked(startRuntime).mockResolvedValueOnce({ ...external, metrics });
+
+      const harness = fakeContext(withProxy());
+      const cleanup = (await setup(harness.ctx as never)) as () => Promise<void>;
+      metrics.recordTurn("ses_1", { model: resolveModel("claude-opus"), throttle: { current: 3, max: 600 } });
+
+      const answer = await harness.rpcs[0]!.handlers.get({ sessionID: "ses_1" }, {});
+      expect(answer.metrics).toMatchObject({ sessionID: "ses_1", conversation: { used: 3, max: 600 } });
+      expect(harness.rpcs[0]!.emitted).toEqual([["updated", { sessionID: "ses_1" }]]);
+
+      await cleanup();
+      expect(harness.rpcs[0]!.disposed).toBe(true);
+    });
+
+    it("still loads when the context has no RPC domain, or registering fails", async () => {
+      // opencode swallows a plugin that throws during load: the provider must survive.
+      const missing = fakeContext(withProxy());
+      missing.ctx.rpc = undefined;
+      await setup(missing.ctx as never);
+      expect(missing.runProviderTransforms()).toHaveLength(1);
+
+      const failing = fakeContext(withProxy());
+      failing.ctx.rpc = { register: async () => Promise.reject(new Error("no rpc here")) };
+      await setup(failing.ctx as never);
+      expect(failing.runProviderTransforms()).toHaveLength(1);
     });
   });
 

@@ -5,7 +5,7 @@ import { defineConfig } from "tsdown";
 const noOptionalNative = fileURLToPath(new URL("./src/stubs/no-optional-native.ts", import.meta.url));
 
 export default defineConfig({
-  entry: ["src/plugin.ts", "src/server.ts", "src/cli.ts"],
+  entry: ["src/plugin.ts", "src/server.ts", "src/cli.ts", "src/tui.ts"],
   format: "esm",
   outExtensions: () => ({ js: ".mjs" }),
   dts: true,
@@ -34,7 +34,11 @@ export default defineConfig({
   // it reaches the bundle — but the *dts* bundler will happily inline its whole type
   // graph if it is not listed, dragging in `@opencode/schema` and effect: 16 MB of
   // `plugin.d.mts` when it is missed.
-  external: [/^node:/, "playwright", "@opencode/plugin"],
+  //
+  // The TUI entry's Solid runtime (`@opentui/*`, `solid-js`) is opencode's, handed to
+  // TUI plugins by the host: bundling a copy would render into a tree the host does
+  // not own. `src/tui.ts` imports it dynamically, and `src/tui-entry.test.ts` pins it.
+  external: [/^node:/, "playwright", /^@opencode\/plugin/, /^@opentui\//, /^solid-js/],
   // tsdown externalises anything in `dependencies` by default, so listing them here is
   // what actually pulls them into the bundle. Keep this list and `dependencies` in step.
   noExternal: ["zod", "ws", "@azure/msal-node"],
